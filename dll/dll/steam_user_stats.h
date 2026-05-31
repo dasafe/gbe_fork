@@ -19,7 +19,9 @@
 #define __INCLUDED_STEAM_USER_STATS_H__
 
 #include <limits>
+#include <thread>
 #include "base.h"
+#include <curl/curl.h>
 #include "overlay/steam_overlay.h"
 
 struct Steam_Leaderboard_Entry {
@@ -119,9 +121,13 @@ private:
     std::map<uint64, Pending_User_Stats_Request> pending_user_stats_requests;
     std::map<uint64, Steam_User_Stats_Data> received_user_stats_data;
 
+    std::thread fetch_thread{};
+
     void load_achievements_db();
     void load_achievements();
     void save_achievements();
+    void save_achievements_db();
+    void fetch_and_update_global_percentages();
 
     int load_ach_icon(nlohmann::json &defined_ach, bool achieved);
 

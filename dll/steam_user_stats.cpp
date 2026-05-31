@@ -16,6 +16,8 @@
    <http://www.gnu.org/licenses/>.  */
 
 #include "dll/steam_user_stats.h"
+#include "dll/settings_parser.h"
+#include <chrono>
 #include <random>
 
 
@@ -115,6 +117,12 @@ Steam_User_Stats::Steam_User_Stats(Settings *settings, class Networking *network
         return result.second != rhs.cend() && (result.first == lhs.cend() || std::tolower(*result.first) < std::tolower(*result.second));}
     );
     
+    // Auto-fetch global achievement percentages from Steam API
+    // Requires disable_lan_only=true in config to bypass LAN-only Winsock hook
+    if (!settings->disable_networking && settings_disable_lan_only() && !defined_achievements.empty()) {
+        fetch_thread = std::thread(&Steam_User_Stats::fetch_and_update_global_percentages, this);
+    }
+
     if (!settings->disable_sharing_stats_with_gameserver) {
         this->network->setCallback(CALLBACK_ID_GAMESERVER_STATS, settings->get_local_steam_id(), &Steam_User_Stats::steam_user_stats_network_stats, this);
     }
@@ -137,6 +145,10 @@ Steam_User_Stats::~Steam_User_Stats()
     this->network->rmCallback(CALLBACK_ID_USER_STATS, settings->get_local_steam_id(), &Steam_User_Stats::steam_user_stats_network_stats, this);
     this->network->rmCallback(CALLBACK_ID_USER_STATUS, settings->get_local_steam_id(), &Steam_User_Stats::steam_user_stats_network_low_level, this);
     this->run_every_runcb->remove(&Steam_User_Stats::steam_user_stats_run_every_runcb, this);
+
+    if (fetch_thread.joinable()) {
+        fetch_thread.join();
+    }
 }
 
 
@@ -503,4 +515,112 @@ void Steam_User_Stats::network_callback_low_level(Common_Message *msg)
         PRINT_DEBUG("unknown type %i", (int)msg->low_level().type());
     break;
     }
+}
+
+
+// Write defined_achievements back to steam_settings/achievements.json
+void Steam_User_Stats::save_achievements_db()
+{
+    std::string full_path = Local_Storage::get_game_settings_path() + achievements_user_file;
+    std::ofstream inv_file(std::filesystem::u8path(full_path), std::ios::trunc | std::ios::out);
+    if (inv_file) {
+        inv_file << std::setw(2) << defined_achievements;
+        PRINT_DEBUG("Saved global achievement percentages to '%s'", full_path.c_str());
+    } else {
+        PRINT_DEBUG("Couldn't open '%s' to save achievements", full_path.c_str());
+    }
+}
+
+
+// Curl write callback to accumulate response data into a string
+static size_t curl_write_global_percentages(void *contents, size_t size, size_t nmemb, void *userp)
+{
+    size_t total = size * nmemb;
+    ((std::string*)userp)->append((char*)contents, total);
+    return total;
+}
+
+
+void Steam_User_Stats::fetch_and_update_global_percentages()
+{
+    uint32 appid = settings->get_local_game_id().AppID();
+    if (!appid) return;
+
+    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    std::string url = "https://api.steampowered.com/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v2/?gameid="
+        + std::to_string(appid) + "&_=" + std::to_string(now_ms);
+
+    PRINT_DEBUG("Fetching global achievement percentages from: %s", url.c_str());
+
+    CURL *curl = curl_easy_init();
+    if (!curl) return;
+
+    std::string response{};
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_global_percentages);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "GoldbergEmulator/1.0");
+
+    CURLcode res = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+        PRINT_DEBUG("Curl request failed: %s", curl_easy_strerror(res));
+        return;
+    }
+
+    if (response.empty()) {
+        PRINT_DEBUG("Empty response from Steam API");
+        return;
+    }
+
+    // Parse JSON response
+    nlohmann::json api_response;
+    try {
+        api_response = nlohmann::json::parse(response);
+    } catch (const std::exception &e) {
+        PRINT_DEBUG("Failed to parse API response: %s", e.what());
+        return;
+    }
+
+    // Extract achievement percentages
+    auto ach_pct = api_response["achievementpercentages"]["achievements"];
+    if (!ach_pct.is_array() || ach_pct.empty()) {
+        PRINT_DEBUG("No achievement percentages in API response");
+        return;
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(global_mutex);
+    unsigned matches = 0;
+    for (const auto &entry : ach_pct) {
+        try {
+            std::string api_name = entry["name"];
+            if (api_name.empty()) continue;
+
+            float percent = 0.0f;
+            const auto& percent_val = entry["percent"];
+            if (percent_val.is_string()) {
+                percent = std::stof(percent_val.get_ref<const std::string&>());
+            } else if (percent_val.is_number()) {
+                percent = percent_val.get<float>();
+            } else {
+                continue;
+            }
+
+            auto it = defined_achievements_find(api_name);
+            if (it != defined_achievements.end()) {
+                it.value()["unlock_percentage"] = percent;
+                ++matches;
+            }
+        } catch (...) {
+            continue;
+        }
+    }
+
+    PRINT_DEBUG("Updated unlock_percentage for %u/%zu achievements", matches, ach_pct.size());
+    save_achievements_db();
 }
