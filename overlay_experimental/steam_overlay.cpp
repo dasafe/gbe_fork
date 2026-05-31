@@ -430,6 +430,9 @@ void Steam_Overlay::load_achievements_data()
         const char *hidden = steamUserStats->GetAchievementDisplayAttribute(ach.name.c_str(), "hidden");
         ach.hidden = hidden && hidden[0] == '1';
 
+        ach.unlock_percentage = static_cast<float>(
+            steamUserStats->GetAchievementUnlockPercentage(ach.name.c_str()));
+
         bool achieved = false;
         uint32 unlock_time = 0;
         if (steamUserStats->GetAchievementAndUnlockTime(ach.name.c_str(), &achieved, &unlock_time)) {
@@ -1759,11 +1762,25 @@ void Steam_Overlay::render_main_window()
                     [this](size_t a, size_t b) {
                         return achievements[a].unlock_time > achievements[b].unlock_time;
                     });
+                std::sort(locked_idx.begin(), locked_idx.end(),
+                    [this](size_t a, size_t b) {
+                        float pct_a = achievements[a].unlock_percentage;
+                        float pct_b = achievements[b].unlock_percentage;
+                        if (pct_a < 0.0f && pct_b < 0.0f) return false;
+                        if (pct_a < 0.0f) return false;
+                        if (pct_b < 0.0f) return true;
+                        return pct_a > pct_b;
+                    });
 
                 // Lambda to render a single achievement card
                 auto render_ach = [this](Overlay_Achievement &x) {
                     const bool achieved = x.achieved;
                     const bool hidden = x.hidden && !achieved;
+
+                    if (x.unlock_percentage < 0.0f && x.name.size()) {
+                        x.unlock_percentage = static_cast<float>(
+                            get_steam_client()->steam_user_stats->GetAchievementUnlockPercentage(x.name.c_str()));
+                    }
 
                     // Load only the icon matching the current state.
                     // The other variant is loaded by the background pagination or on state change.
@@ -1794,7 +1811,33 @@ void Steam_Overlay::render_main_window()
                         }
                     }
 
-                    ImGui::Text("%s", x.title.c_str());
+                    if (x.unlock_percentage >= 0.0f) {
+                        float display_pct = x.unlock_percentage;
+                        if (display_pct < 0.1f) {
+                            display_pct = 0.1f;
+                        }
+                        char pct_buf[32];
+                        snprintf(pct_buf, sizeof(pct_buf), "%.1f%%", display_pct);
+                        const ImVec2 pct_size = ImGui::CalcTextSize(pct_buf);
+                        ImGui::PushID(&x);
+                        if (ImGui::BeginTable("achievement_title", 2, ImGuiTableFlags_SizingStretchProp)) {
+                            ImGui::TableSetupColumn("title");
+                            ImGui::TableSetupColumn("percent", ImGuiTableColumnFlags_WidthFixed, pct_size.x);
+                            ImGui::TableNextRow();
+                            ImGui::TableSetColumnIndex(0);
+                            ImGui::Text("%s", x.title.c_str());
+                            ImGui::TableSetColumnIndex(1);
+                            ImGui::TextDisabled("%s", pct_buf);
+                            ImGui::EndTable();
+                        } else {
+                            ImGui::Text("%s", x.title.c_str());
+                            ImGui::SameLine();
+                            ImGui::TextDisabled("%s", pct_buf);
+                        }
+                        ImGui::PopID();
+                    } else {
+                        ImGui::Text("%s", x.title.c_str());
+                    }
 
                     if (hidden) {
                         ImGui::Text("%s", translationHiddenAchievement[current_language]);
@@ -1829,6 +1872,10 @@ void Steam_Overlay::render_main_window()
                         ImGui::TextColored(ImVec4(0, 255, 0, 255), translationAchievedOn[current_language], buffer);
                     } else {
                         ImGui::TextColored(ImVec4(255, 0, 0, 255), "%s", translationNotAchieved[current_language]);
+                    }
+
+                    if (x.unlock_percentage >= 0.0f) {
+                        ImGui::Text("(%.1f%%)", x.unlock_percentage);
                     }
                     add_ach_progressbar(x);
 
