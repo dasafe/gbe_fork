@@ -98,7 +98,8 @@ Steam_Client::Steam_Client()
 
     // client
     PRINT_DEBUG("init client");
-    steam_overlay = new Steam_Overlay(settings_client, local_storage, callback_results_client, callbacks_client, run_every_runcb, network);
+    playtime_counter = new PlaytimeCounter(local_storage);
+    steam_overlay = new Steam_Overlay(settings_client, local_storage, callback_results_client, callbacks_client, run_every_runcb, network, playtime_counter);
 
     steam_user = new Steam_User(settings_client, local_storage, network, callback_results_client, callbacks_client, false);
     steam_friends = new Steam_Friends(settings_client, local_storage, network, callback_results_client, callbacks_client, run_every_runcb, steam_overlay);
@@ -161,8 +162,6 @@ Steam_Client::Steam_Client()
 
     PRINT_DEBUG("init AppTicket");
     steam_app_ticket = new Steam_AppTicket(settings_client);
-
-    playtime_counter = new PlaytimeCounter(local_storage);
 
     gameserver_has_ipv6_functions = false;
     steamclient_version = 6; // default for C exports

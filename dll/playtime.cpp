@@ -20,7 +20,9 @@
 #include <limits>
 
 PlaytimeCounter::PlaytimeCounter(Local_Storage* local_storage)
-   : local_storage(local_storage), last_tick(std::chrono::steady_clock::now())
+   : local_storage(local_storage),
+     session_start_time(std::chrono::steady_clock::now()),
+     last_tick(session_start_time)
 {
     load();
 }
@@ -46,20 +48,24 @@ void PlaytimeCounter::tick()
     {
         std::lock_guard<std::mutex> lock(mutex);
 
-        auto delta = std::chrono::duration_cast<std::chrono::seconds>(now - last_tick).count();
-        if (delta <= 0) return;
+        auto delta_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_tick).count();
+        if (delta_ms <= 0) return;
 
-        uint64_t inc = static_cast<uint64_t>(delta);
-        const uint64_t maxv = std::numeric_limits<uint64_t>::max();
-        if (playtime_seconds > maxv - inc) {
-            playtime_seconds = maxv;
-        } else {
-            playtime_seconds += inc;
-        }
-        
         last_tick = now;
 
-        since_save += delta;
+        // Accumulate milliseconds, convert whole seconds to playtime_seconds
+        playtime_accumulator_ms += static_cast<uint64_t>(delta_ms);
+        uint64_t accrued_sec = playtime_accumulator_ms / 1000;
+        playtime_accumulator_ms %= 1000;
+
+        const uint64_t maxv = std::numeric_limits<uint64_t>::max();
+        if (playtime_seconds > maxv - accrued_sec) {
+            playtime_seconds = maxv;
+        } else {
+            playtime_seconds += accrued_sec;
+        }
+
+        since_save += accrued_sec;
         if (since_save >= 60) {
             since_save = 0;
             need_save = true;
@@ -76,6 +82,7 @@ void PlaytimeCounter::load()
     std::lock_guard<std::mutex> lock(mutex);
 
     playtime_seconds = 0;
+    playtime_accumulator_ms = 0;
 
     std::string data(32, '\0');
     if (local_storage->get_data("", playtime_filename, data.data(), static_cast<unsigned int>(data.size()), 0) > 0) {
@@ -99,4 +106,10 @@ uint64_t PlaytimeCounter::seconds() const
 {
     std::lock_guard<std::mutex> lock(mutex);
     return playtime_seconds;
+}
+
+uint64_t PlaytimeCounter::session_seconds() const
+{
+    auto now = std::chrono::steady_clock::now();
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(now - session_start_time).count());
 }

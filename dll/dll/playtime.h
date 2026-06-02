@@ -37,12 +37,15 @@ public:
 
     // Get current playtime in seconds
     uint64_t seconds() const;
+    uint64_t session_seconds() const;
 
 private:
     Local_Storage* local_storage{};
     const std::string playtime_filename = "playtime.txt";
+    std::chrono::steady_clock::time_point session_start_time{};
     std::chrono::steady_clock::time_point last_tick{};
     uint64_t playtime_seconds = 0;
+    uint64_t playtime_accumulator_ms = 0; // sub-second accumulation
     mutable std::mutex mutex;
     bool initialized = false;
     uint64_t since_save = 0; // seconds since last save
