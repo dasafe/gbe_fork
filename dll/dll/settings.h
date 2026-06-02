@@ -157,6 +157,7 @@ struct Overlay_Appearance {
     uint32 notification_duration_chat = 4000; // sliding animation duration duration (millisec)
 
     std::string ach_unlock_datetime_format = "%Y/%m/%d - %H:%M:%S";
+    bool show_notification_history = false;
     
     float background_r = 0.12f;
     float background_g = 0.11f;
