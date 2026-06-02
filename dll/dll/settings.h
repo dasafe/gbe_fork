@@ -158,6 +158,9 @@ struct Overlay_Appearance {
 
     std::string ach_unlock_datetime_format = "%Y/%m/%d - %H:%M:%S";
     bool show_notification_history = false;
+    bool show_achievement_list = false;
+    bool unlocked_expanded = true;
+    bool locked_expanded = false;
     
     float background_r = 0.12f;
     float background_g = 0.11f;
