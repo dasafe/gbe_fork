@@ -186,6 +186,7 @@ Steam_Overlay::Steam_Overlay(Settings* settings, Local_Storage *local_storage, S
     const char *language = settings->get_language();
 
     show_user_info = settings->overlay_always_show_user_info;
+    show_notification_history = settings->overlay_appearance.show_notification_history;
 
     int i = 0;
     for (auto &lang : valid_languages) {

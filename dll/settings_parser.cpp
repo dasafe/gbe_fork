@@ -377,6 +377,10 @@ static void load_overlay_appearance(class Settings *settings_client, class Setti
             } else if (name.compare("Achievement_Unlock_Datetime_Format") == 0) {
                 settings_client->overlay_appearance.ach_unlock_datetime_format = value;
                 settings_server->overlay_appearance.ach_unlock_datetime_format = value;
+            } else if (name.compare("Show_Notification_History") == 0) {
+                bool show = (std::stol(value, NULL) != 0);
+                settings_client->overlay_appearance.show_notification_history = show;
+                settings_server->overlay_appearance.show_notification_history = show;
             } else if (name.compare("Achievement_Notification_Delay") == 0) {
                 float delay_sec = std::stof(value, NULL);
                 settings_client->achievement_notification_delay_ms = static_cast<int>(delay_sec * 1000.0f);
