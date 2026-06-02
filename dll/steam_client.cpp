@@ -18,7 +18,27 @@
 #include "dll/steam_client.h"
 #include "dll/settings_parser.h"
 #include "dll/dll.h"
+#include <optional>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
+
+// Returns true if the game window is the currently focused foreground window.
+// On non-Windows platforms, always returns true (no focus-based pausing).
+static bool is_game_focused()
+{
+#if defined(_WIN32)
+    HWND fg = GetForegroundWindow();
+    if (!fg) return false;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(fg, &pid);
+    return pid == GetCurrentProcessId();
+#else
+    return true;
+#endif
+}
 
 void Steam_Client::background_thread_proc()
 {
@@ -38,6 +58,15 @@ void Steam_Client::background_thread_proc()
     }
 
     if (settings_client->record_playtime) {
+        // Only update pause flags when focus state actually changes,
+        // to avoid pointless mutex acquisitions on every tick.
+        static std::optional<bool> last_focused;
+        bool focused = is_game_focused();
+        if (!last_focused.has_value() || *last_focused != focused) {
+            last_focused = focused;
+            playtime_counter->set_pause_total(settings_client->pause_total_when_unfocused && !focused);
+            playtime_counter->set_pause_session(settings_client->pause_session_when_unfocused && !focused);
+        }
         playtime_counter->tick(); // update playtime counter
     }
 }
@@ -98,7 +127,8 @@ Steam_Client::Steam_Client()
 
     // client
     PRINT_DEBUG("init client");
-    steam_overlay = new Steam_Overlay(settings_client, local_storage, callback_results_client, callbacks_client, run_every_runcb, network);
+    playtime_counter = new PlaytimeCounter(local_storage);
+    steam_overlay = new Steam_Overlay(settings_client, local_storage, callback_results_client, callbacks_client, run_every_runcb, network, playtime_counter);
 
     steam_user = new Steam_User(settings_client, local_storage, network, callback_results_client, callbacks_client, false);
     steam_friends = new Steam_Friends(settings_client, local_storage, network, callback_results_client, callbacks_client, run_every_runcb, steam_overlay);
@@ -161,8 +191,6 @@ Steam_Client::Steam_Client()
 
     PRINT_DEBUG("init AppTicket");
     steam_app_ticket = new Steam_AppTicket(settings_client);
-
-    playtime_counter = new PlaytimeCounter(local_storage);
 
     gameserver_has_ipv6_functions = false;
     steamclient_version = 6; // default for C exports

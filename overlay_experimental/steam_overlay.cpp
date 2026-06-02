@@ -141,13 +141,14 @@ void Steam_Overlay::parse_key_combo()
     }
 }
 
-Steam_Overlay::Steam_Overlay(Settings* settings, Local_Storage *local_storage, SteamCallResults* callback_results, SteamCallBacks* callbacks, RunEveryRunCB* run_every_runcb, Networking* network) :
+Steam_Overlay::Steam_Overlay(Settings* settings, Local_Storage *local_storage, SteamCallResults* callback_results, SteamCallBacks* callbacks, RunEveryRunCB* run_every_runcb, Networking* network, PlaytimeCounter* playtime_counter) :
     settings(settings),
     local_storage(local_storage),
     callback_results(callback_results),
     callbacks(callbacks),
     run_every_runcb(run_every_runcb),
     network(network),
+    playtime_counter(playtime_counter),
     stats(Steam_Overlay_Stats(settings))
 {
     // don't even bother initializing the overlay
@@ -1685,6 +1686,24 @@ void Steam_Overlay::render_main_window()
                 settings->get_local_name(),
                 settings->get_local_steam_id().ConvertToUint64(),
                 settings->get_local_game_id().AppID());
+
+            if (settings->record_playtime && playtime_counter && settings->overlay_appearance.show_playtime_in_user_info) {
+                uint64_t session_sec = playtime_counter->session_seconds();
+                unsigned ss = static_cast<unsigned>(session_sec % 60);
+                unsigned mm = static_cast<unsigned>((session_sec / 60) % 60);
+                unsigned hh = static_cast<unsigned>(session_sec / 3600);
+
+                uint64_t total_sec = playtime_counter->seconds();
+                unsigned total_h = static_cast<unsigned>(total_sec / 3600);
+                unsigned total_m = static_cast<unsigned>((total_sec % 3600) / 60);
+
+                char total_buf[32]{};
+                char session_buf[32];
+                snprintf(total_buf, sizeof(total_buf), "%uh %um", total_h, total_m);
+                snprintf(session_buf, sizeof(session_buf), "%02u:%02u:%02u", hh, mm, ss);
+
+                ImGui::LabelText("##playtime", "Total: %s  Session: %s", total_buf, session_buf);
+            }
         }
 
         ImGui::Spacing();

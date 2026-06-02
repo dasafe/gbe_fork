@@ -2,6 +2,7 @@
 #define _STEAM_OVERLAY_STATS_H_
 
 #include <chrono>
+#include <optional>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -25,6 +26,8 @@ private:
         std::chrono::high_resolution_clock::now();
     std::chrono::high_resolution_clock::time_point last_playtime =
         std::chrono::high_resolution_clock::now();
+    std::chrono::high_resolution_clock::duration total_playtime_paused{0};
+    std::optional<std::chrono::high_resolution_clock::time_point> playtime_pause_start;
     unsigned active_playtime_hr = 0;
     unsigned active_playtime_min = 0;
     unsigned active_playtime_sec = 0;

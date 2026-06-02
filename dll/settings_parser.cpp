@@ -381,6 +381,10 @@ static void load_overlay_appearance(class Settings *settings_client, class Setti
                 bool show = (std::stol(value, NULL) != 0);
                 settings_client->overlay_appearance.show_notification_history = show;
                 settings_server->overlay_appearance.show_notification_history = show;
+            } else if (name.compare("Show_Playtime_In_User_Info") == 0) {
+                bool show = (std::stol(value, NULL) != 0);
+                settings_client->overlay_appearance.show_playtime_in_user_info = show;
+                settings_server->overlay_appearance.show_playtime_in_user_info = show;
             } else if (name.compare("Achievement_Notification_Delay") == 0) {
                 float delay_sec = std::stof(value, NULL);
                 settings_client->achievement_notification_delay_ms = static_cast<int>(delay_sec * 1000.0f);
@@ -1766,6 +1770,11 @@ static void parse_stats_features(class Settings *settings_client, class Settings
 
     settings_client->record_playtime = ini.GetBoolValue("main::stats", "record_playtime", settings_client->record_playtime);
     settings_server->record_playtime = ini.GetBoolValue("main::stats", "record_playtime", settings_server->record_playtime);
+
+    settings_client->pause_total_when_unfocused = ini.GetBoolValue("main::stats", "pause_total_when_unfocused", settings_client->pause_total_when_unfocused);
+    settings_server->pause_total_when_unfocused = ini.GetBoolValue("main::stats", "pause_total_when_unfocused", settings_server->pause_total_when_unfocused);
+    settings_client->pause_session_when_unfocused = ini.GetBoolValue("main::stats", "pause_session_when_unfocused", settings_client->pause_session_when_unfocused);
+    settings_server->pause_session_when_unfocused = ini.GetBoolValue("main::stats", "pause_session_when_unfocused", settings_server->pause_session_when_unfocused);
 }
 
 

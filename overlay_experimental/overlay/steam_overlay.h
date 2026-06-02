@@ -11,6 +11,7 @@
 #include <future>
 #include <atomic>
 #include <memory>
+#include "dll/playtime.h"
 #include "InGameOverlay/RendererHook.h"
 #include "InGameOverlay/ImGui/imgui.h"
 #include "overlay/steam_overlay_stats.h"
@@ -120,6 +121,7 @@ class Steam_Overlay
     class SteamCallBacks* callbacks;
     class RunEveryRunCB* run_every_runcb;
     class Networking* network;
+    class PlaytimeCounter* playtime_counter;
     class Steam_Overlay_Stats stats;
 
     // friend id, show client window (to chat and accept invite maybe)
@@ -288,7 +290,7 @@ class Steam_Overlay
     static void overlay_networking_callback(void* object, Common_Message* msg);
     
 public:
-    Steam_Overlay(Settings* settings, Local_Storage *local_storage, SteamCallResults* callback_results, SteamCallBacks* callbacks, RunEveryRunCB* run_every_runcb, Networking *network);
+    Steam_Overlay(Settings* settings, Local_Storage *local_storage, SteamCallResults* callback_results, SteamCallBacks* callbacks, RunEveryRunCB* run_every_runcb, Networking *network, PlaytimeCounter* playtime_counter);
 
     ~Steam_Overlay();
 
@@ -323,10 +325,12 @@ public:
 
 #else // EMU_OVERLAY
 
+class PlaytimeCounter;
+
 class Steam_Overlay
 {
 public:
-    Steam_Overlay(Settings* settings, Local_Storage *local_storage, SteamCallResults* callback_results, SteamCallBacks* callbacks, RunEveryRunCB* run_every_runcb, Networking* network) {}
+    Steam_Overlay(Settings* settings, Local_Storage *local_storage, SteamCallResults* callback_results, SteamCallBacks* callbacks, RunEveryRunCB* run_every_runcb, Networking* network, PlaytimeCounter* playtime_counter) {}
     ~Steam_Overlay() {}
 
     bool Ready() const { return false; }
