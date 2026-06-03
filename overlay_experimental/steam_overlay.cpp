@@ -14,6 +14,7 @@
 #include <utility>
 #include <unordered_set>
 #include <unordered_map>
+#include <algorithm>
 
 #include "InGameOverlay/RendererDetector.h"
 
@@ -188,7 +189,7 @@ Steam_Overlay::Steam_Overlay(Settings* settings, Local_Storage *local_storage, S
 
     show_user_info = settings->overlay_always_show_user_info;
     show_notification_history = settings->overlay_appearance.show_notification_history;
-
+ 
     int i = 0;
     for (auto &lang : valid_languages) {
         if (common_helpers::str_cmp_insensitive(lang, language)) {
@@ -1872,6 +1873,7 @@ void Steam_Overlay::render_main_window()
         if (show_achievements && achievements.size()) {
             ImGui::SetNextWindowSizeConstraints(ImVec2(ImGui::GetFontSize() * 32, ImGui::GetFontSize() * 32), ImVec2(8192, 8192));
             ImGui::SetNextWindowBgAlpha(1.0f);
+            ImGui::SetNextWindowPos(ImVec2(ImGui::GetFontSize() * 4, std::max(ImGui::GetFontSize() * 10, io.DisplaySize.y * 0.15f)), ImGuiCond_FirstUseEver);
             if (ImGui::Begin(translationAchievementWindow[current_language], &show_achievements)) {
                 ImGui::Text("%s", translationListOfAchievements[current_language]);
                 ImGui::BeginChild(translationAchievements[current_language]);
