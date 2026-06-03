@@ -189,7 +189,8 @@ Steam_Overlay::Steam_Overlay(Settings* settings, Local_Storage *local_storage, S
 
     show_user_info = settings->overlay_always_show_user_info;
     show_notification_history = settings->overlay_appearance.show_notification_history;
- 
+    show_achievements = settings->overlay_appearance.show_achievement_list;
+
     int i = 0;
     for (auto &lang : valid_languages) {
         if (common_helpers::str_cmp_insensitive(lang, language)) {
@@ -2034,7 +2035,7 @@ void Steam_Overlay::render_main_window()
                 };
 
                 // --- Unlocked section ---
-                if (ImGui::CollapsingHeader("Unlocked", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (ImGui::CollapsingHeader("Unlocked", settings->overlay_appearance.unlocked_expanded ? ImGuiTreeNodeFlags_DefaultOpen : ImGuiTreeNodeFlags_None)) {
                     if (unlocked_idx.empty()) {
                         ImGui::TextDisabled("No achievements unlocked yet");
                     } else {
@@ -2045,7 +2046,7 @@ void Steam_Overlay::render_main_window()
                 }
 
                 // --- Locked section ---
-                if (ImGui::CollapsingHeader("Locked", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (ImGui::CollapsingHeader("Locked", settings->overlay_appearance.locked_expanded ? ImGuiTreeNodeFlags_DefaultOpen : ImGuiTreeNodeFlags_None)) {
                     if (locked_idx.empty()) {
                         ImGui::TextDisabled("All achievements unlocked!");
                     } else {
