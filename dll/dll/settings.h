@@ -391,6 +391,16 @@ public:
     // minimum time interval between achievement notifications (in milliseconds)
     int achievement_notification_delay_ms = 0;
 
+    // game update check via SteamDB RSS
+    bool check_for_game_updates = false;
+
+    // set by Steam_User_Stats fetch thread, read by overlay
+    bool pending_update_available = false;
+    uint32 pending_update_latest_build = 0;
+    uint32 pending_update_installed_build = 0;
+    std::string pending_update_version;
+    std::string pending_update_date;
+
     // free weekend
     bool free_weekend = false;
 

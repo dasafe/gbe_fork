@@ -15,6 +15,7 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <algorithm>
+#include <shellapi.h>
 
 #include "InGameOverlay/RendererDetector.h"
 
@@ -691,6 +692,7 @@ bool Steam_Overlay::submit_notification(
         case notification_type::achievement:
         case notification_type::auto_accept_invite:
         case notification_type::message:
+        case notification_type::game_update:
             // nothing
         break;
 
@@ -915,6 +917,9 @@ std::chrono::milliseconds Steam_Overlay::get_notification_duration(notification_
 
     case notification_type::auto_accept_invite:
         return Notification::default_show_time;
+
+    case notification_type::game_update:
+        return std::chrono::hours(24); // stay until user clicks a button
     }
 
     PRINT_DEBUG("ERROR unhandled type %i", (int)type);
@@ -1179,7 +1184,8 @@ void Steam_Overlay::build_notifications(float width, float height)
             break;
 
             case notification_type::invite:
-                // nothing
+            case notification_type::game_update:
+                // nothing (needs input for buttons)
             break;
 
             default:
@@ -1252,6 +1258,46 @@ void Steam_Overlay::build_notifications(float width, float height)
 
                 case notification_type::auto_accept_invite:
                     ImGui::TextWrapped("%s", it->message.c_str());
+                break;
+
+                case notification_type::game_update: {
+                    ImGui::TextWrapped("Game update available!");
+                    ImGui::Spacing();
+                    ImGui::TextWrapped("Installed build: %u", settings->pending_update_installed_build);
+                    ImGui::TextWrapped("Latest build: %u", settings->pending_update_latest_build);
+                    if (settings->pending_update_version.size()) {
+                        ImGui::TextWrapped("%s", settings->pending_update_version.c_str());
+                    }
+                    if (settings->pending_update_date.size()) {
+                        ImGui::TextWrapped("(%s)", settings->pending_update_date.c_str());
+                    }
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    if (ImGui::Button("Yes, updated")) {
+                        // Update the active branch's build_id in branches.json
+                        for (auto &branch : settings->branches) {
+                            if (branch.active) {
+                                branch.build_id = settings->pending_update_latest_build;
+                                branch.time_updated_epoch = (uint32)std::chrono::duration_cast<std::chrono::seconds>(
+                                    std::chrono::system_clock::now().time_since_epoch()).count();
+                                break;
+                            }
+                        }
+                        save_branches_json(settings->branches, local_storage);
+                        it->start_time = {}; // expire notification
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Get update")) {
+                        std::string url = "https://cs.rin.ru/forum/search.php?keywords="
+                            + std::to_string(settings->get_local_game_id().AppID())
+                            + "&sf=msgonly&sr=topics";
+                        ShellExecuteA(NULL, "open", url.c_str(), NULL, NULL, SW_SHOWNORMAL);
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("X")) {
+                        it->start_time = {}; // expire notification
+                    }
+                }
                 break;
 
                 default:
@@ -1375,6 +1421,7 @@ void Steam_Overlay::build_notifications(float width, float height)
                 case notification_type::achievement:
                 case notification_type::auto_accept_invite:
                 case notification_type::message:
+                case notification_type::game_update:
                     // nothing
                 break;
 
@@ -1572,6 +1619,19 @@ void Steam_Overlay::overlay_render_proc()
 
     // Process achievement queue to show scheduled notifications
     process_achievement_queue();
+
+    // Check for pending game update notification
+    if (settings->pending_update_available) {
+        std::string msg = "Update available";
+        if (settings->pending_update_version.size()) {
+            msg += ": " + settings->pending_update_version;
+        }
+        if (settings->pending_update_date.size()) {
+            msg += " (" + settings->pending_update_date + ")";
+        }
+        submit_notification(notification_type::game_update, msg);
+        settings->pending_update_available = false;
+    }
 
     if (show_overlay) {
         render_main_window();

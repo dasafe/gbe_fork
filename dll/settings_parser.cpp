@@ -1655,6 +1655,9 @@ static void parse_overlay_general_config(class Settings *settings_client, class 
     settings_client->overlay_always_show_playtime = ini.GetBoolValue("overlay::general", "overlay_always_show_playtime", settings_client->overlay_always_show_playtime);
     settings_server->overlay_always_show_playtime = ini.GetBoolValue("overlay::general", "overlay_always_show_playtime", settings_server->overlay_always_show_playtime);
 
+    settings_client->check_for_game_updates = ini.GetBoolValue("overlay::general", "check_for_game_updates", settings_client->check_for_game_updates);
+    settings_server->check_for_game_updates = ini.GetBoolValue("overlay::general", "check_for_game_updates", settings_server->check_for_game_updates);
+
     {
         auto val = ini.GetLongValue("overlay::general", "fps_averaging_window", settings_client->overlay_fps_avg_window);
         if (val > 0) {
@@ -2117,6 +2120,32 @@ bool settings_disable_lan_only()
 {
     load_all_config_settings();
     return ini.GetBoolValue("main::connectivity", "disable_lan_only", false);
+}
+
+bool save_branches_json(const std::vector<Branch_Info> &branches, class Local_Storage *local_storage)
+{
+    nlohmann::json json_data = nlohmann::json::array();
+    for (const auto &branch : branches) {
+        nlohmann::json entry;
+        entry["name"] = branch.name;
+        entry["description"] = branch.description;
+        entry["protected"] = branch.branch_protected;
+        entry["build_id"] = branch.build_id;
+        entry["time_updated"] = branch.time_updated_epoch;
+        json_data.push_back(entry);
+    }
+
+    std::string json_str = json_data.dump(2);
+    auto full_path = Local_Storage::get_game_settings_path() + "branches.json";
+    std::ofstream out_file(std::filesystem::u8path(full_path), std::ios::trunc | std::ios::out);
+    if (out_file) {
+        out_file << json_str;
+        PRINT_DEBUG("Saved branches.json with updated build_id");
+        return true;
+    }
+
+    PRINT_DEBUG("Couldn't save branches.json");
+    return false;
 }
 
 const std::map<SettingsItf, std::string>& settings_old_interfaces()

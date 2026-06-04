@@ -122,12 +122,14 @@ private:
     std::map<uint64, Steam_User_Stats_Data> received_user_stats_data;
 
     std::thread fetch_thread{};
+    std::thread update_check_thread{};
 
     void load_achievements_db();
     void load_achievements();
     void save_achievements();
     void save_achievements_db();
     void fetch_and_update_global_percentages();
+    void fetch_and_check_game_update();
 
     int load_ach_icon(nlohmann::json &defined_ach, bool achieved);
 

@@ -123,6 +123,11 @@ Steam_User_Stats::Steam_User_Stats(Settings *settings, class Networking *network
         fetch_thread = std::thread(&Steam_User_Stats::fetch_and_update_global_percentages, this);
     }
 
+    // Check for game updates via SteamDB RSS
+    if (!settings->disable_networking && settings_disable_lan_only() && settings->check_for_game_updates) {
+        update_check_thread = std::thread(&Steam_User_Stats::fetch_and_check_game_update, this);
+    }
+
     if (!settings->disable_sharing_stats_with_gameserver) {
         this->network->setCallback(CALLBACK_ID_GAMESERVER_STATS, settings->get_local_steam_id(), &Steam_User_Stats::steam_user_stats_network_stats, this);
     }
@@ -148,6 +153,10 @@ Steam_User_Stats::~Steam_User_Stats()
 
     if (fetch_thread.joinable()) {
         fetch_thread.join();
+    }
+
+    if (update_check_thread.joinable()) {
+        update_check_thread.join();
     }
 }
 
@@ -623,4 +632,138 @@ void Steam_User_Stats::fetch_and_update_global_percentages()
 
     PRINT_DEBUG("Updated unlock_percentage for %u/%zu achievements", matches, ach_pct.size());
     save_achievements_db();
+}
+
+
+// Curl write callback for SteamDB RSS
+static size_t curl_write_steamdb_rss(void *contents, size_t size, size_t nmemb, void *userp)
+{
+    size_t total = size * nmemb;
+    ((std::string*)userp)->append((char*)contents, total);
+    return total;
+}
+
+
+void Steam_User_Stats::fetch_and_check_game_update()
+{
+    uint32 appid = settings->get_local_game_id().AppID();
+    if (!appid) return;
+
+    std::string url = "https://steamdb.info/api/PatchnotesRSS/?appid=" + std::to_string(appid);
+
+    PRINT_DEBUG("Checking for game updates via SteamDB RSS: %s", url.c_str());
+
+    CURL *curl = curl_easy_init();
+    if (!curl) return;
+
+    std::string response{};
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_steamdb_rss);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "GoldbergEmulator/1.0");
+
+    CURLcode res = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+        PRINT_DEBUG("Curl request failed: %s", curl_easy_strerror(res));
+        return;
+    }
+
+    if (response.empty()) {
+        PRINT_DEBUG("Empty response from SteamDB RSS");
+        return;
+    }
+
+    // Parse the latest build ID from the RSS feed
+    // Format: <guid>build#<number></guid>
+    std::string build_tag = "build#";
+    auto build_pos = response.find(build_tag);
+    if (build_pos == std::string::npos) {
+        PRINT_DEBUG("Could not find build# in SteamDB RSS response");
+        return;
+    }
+
+    auto build_start = build_pos + build_tag.size();
+    auto build_end = response.find_first_not_of("0123456789", build_start);
+    if (build_end == std::string::npos) {
+        PRINT_DEBUG("Could not parse build number from SteamDB RSS");
+        return;
+    }
+
+    uint32 latest_build = 0;
+    try {
+        latest_build = static_cast<uint32>(std::stoul(response.substr(build_start, build_end - build_start)));
+    } catch (...) {
+        PRINT_DEBUG("Failed to convert build number");
+        return;
+    }
+
+    // Parse the version string from the first <title> after the first <item>
+    // Format: <title>Mina the Hollower update for 4 June 2026</title>
+    // But the <description> has: Version 1.0.5 [r148188] (SteamDB Build 23559724)
+    std::string version_str;
+    auto desc_start = response.find("<description>");
+    if (desc_start != std::string::npos) {
+        auto desc_content_start = desc_start + 13; // length of "<description>"
+        auto desc_end = response.find("</description>", desc_content_start);
+        if (desc_end != std::string::npos) {
+            version_str = response.substr(desc_content_start, desc_end - desc_content_start);
+            // Remove CDATA if present
+            auto cdata_start = version_str.find("<![CDATA[");
+            if (cdata_start != std::string::npos) {
+                cdata_start += 9; // length of "<![CDATA["
+                auto cdata_end = version_str.find("]]>", cdata_start);
+                if (cdata_end != std::string::npos) {
+                    version_str = version_str.substr(cdata_start, cdata_end - cdata_start);
+                }
+            }
+        }
+    }
+
+    // Parse the pubDate from the first <item>
+    std::string date_str;
+    auto pubdate_start = response.find("<pubDate>");
+    if (pubdate_start != std::string::npos) {
+        auto pubdate_content_start = pubdate_start + 9; // length of "<pubDate>"
+        auto pubdate_end = response.find("</pubDate>", pubdate_content_start);
+        if (pubdate_end != std::string::npos) {
+            date_str = response.substr(pubdate_content_start, pubdate_end - pubdate_content_start);
+        }
+    }
+
+    PRINT_DEBUG("SteamDB latest build: %u, version: '%s', date: '%s'", latest_build, version_str.c_str(), date_str.c_str());
+
+    // Get the installed build ID from the active branch (public branch)
+    uint32 installed_build = 0;
+    for (const auto &branch : settings->branches) {
+        if (branch.active) {
+            installed_build = branch.build_id;
+            break;
+        }
+    }
+
+    if (installed_build == 0) {
+        PRINT_DEBUG("Could not determine installed build from branches");
+        return;
+    }
+
+    PRINT_DEBUG("Installed build: %u, Latest build: %u", installed_build, latest_build);
+
+    // If latest build > installed build, there's an update available
+    if (latest_build > installed_build) {
+        PRINT_DEBUG("Game update available: %u -> %u", installed_build, latest_build);
+        // Set all data fields first, then the flag last to avoid race with overlay render
+        settings->pending_update_latest_build = latest_build;
+        settings->pending_update_installed_build = installed_build;
+        settings->pending_update_version = version_str;
+        settings->pending_update_date = date_str;
+        settings->pending_update_available = true;
+    } else {
+        PRINT_DEBUG("Game is up to date");
+    }
 }
