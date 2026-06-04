@@ -196,6 +196,7 @@ struct Overlay_Appearance {
     NotificationPosition ach_earned_pos = NotificationPosition::bot_right; // achievement earned
     NotificationPosition invite_pos = default_pos; // lobby/game invitation
     NotificationPosition chat_msg_pos = NotificationPosition::top_center; // chat message from a friend
+    NotificationPosition game_update_pos = NotificationPosition::bot_center; // game update notification
 
     static NotificationPosition translate_notification_position(const std::string &str);
 };

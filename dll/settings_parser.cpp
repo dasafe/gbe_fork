@@ -477,6 +477,10 @@ static void load_overlay_appearance(class Settings *settings_client, class Setti
                 auto pos = Overlay_Appearance::translate_notification_position(value);
                 settings_client->overlay_appearance.chat_msg_pos = pos;
                 settings_server->overlay_appearance.chat_msg_pos = pos;
+            } else if (name.compare("PosGameUpdate") == 0) {
+                auto pos = Overlay_Appearance::translate_notification_position(value);
+                settings_client->overlay_appearance.game_update_pos = pos;
+                settings_server->overlay_appearance.game_update_pos = pos;
             // >>> FPS background
             } else if (name.compare("Stats_Background_R") == 0) {
                 float val = std::stof(value, NULL);

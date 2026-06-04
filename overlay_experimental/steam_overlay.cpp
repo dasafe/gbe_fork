@@ -10,6 +10,7 @@
 #include <thread>
 #include <string>
 #include <sstream>
+#include <ctime>
 #include <cctype>
 #include <utility>
 #include <unordered_set>
@@ -1002,6 +1003,19 @@ void Steam_Overlay::set_next_notification_pos(std::pair<float, float> scrn_size,
     }
     break;
     case notification_type::message: pos = settings->overlay_appearance.chat_msg_pos; break;
+    case notification_type::game_update: {
+        pos = settings->overlay_appearance.game_update_pos;
+        // The popup renders: title, spacing, version, date, spacing, button row
+        // (no message text, no separator, no "Installed build" lines)
+        // Use GetFrameHeight() for the button row (taller than font_size due to FramePadding)
+        float text_lines = 1.0f;  // title only
+        if (settings->pending_update_version.size()) text_lines += 1.0f;
+        if (settings->pending_update_date.size()) text_lines += 1.0f;
+        noti_height = (text_lines * settings->overlay_appearance.font_size)
+            + ImGui::GetFrameHeight()
+            + (5.0f * global_style.ItemSpacing.y);
+    }
+    break;
     default: PRINT_DEBUG("ERROR: unhandled notification type %i", (int)noti.type); break;
     }
     // add some y padding for niceness
@@ -1261,19 +1275,69 @@ void Steam_Overlay::build_notifications(float width, float height)
                 break;
 
                 case notification_type::game_update: {
+                    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 2));
                     ImGui::TextWrapped("Game update available!");
                     ImGui::Spacing();
-                    ImGui::TextWrapped("Installed build: %u", settings->pending_update_installed_build);
-                    ImGui::TextWrapped("Latest build: %u", settings->pending_update_latest_build);
+
+                    // Show version string with "SteamDB Build " removed for compactness
                     if (settings->pending_update_version.size()) {
-                        ImGui::TextWrapped("%s", settings->pending_update_version.c_str());
+                        std::string clean = settings->pending_update_version;
+                        static const std::string steamdb_label = "(SteamDB Build ";
+                        auto pos = clean.find(steamdb_label);
+                        if (pos != std::string::npos) {
+                            auto build_start = pos + steamdb_label.size();
+                            auto build_end = clean.find(")", build_start);
+                            if (build_end != std::string::npos) {
+                                clean = clean.substr(0, pos) + "("
+                                    + clean.substr(build_start, build_end - build_start) + ")";
+                            }
+                        }
+                        ImGui::TextWrapped("%s", clean.c_str());
                     }
-                    if (settings->pending_update_date.size()) {
-                        ImGui::TextWrapped("(%s)", settings->pending_update_date.c_str());
+
+                    // Show date formatted to local time (RSS date is always UTC +0000)
+                    // RSS format: "Thu, 04 Jun 2026 05:22:08 +0000"
+                    if (settings->pending_update_date.size() && settings->pending_update_date.size() >= 25) {
+                        const std::string &date = settings->pending_update_date;
+                        int day = std::stoi(date.substr(5, 2));
+                        std::string mon = date.substr(8, 3);
+                        int year = std::stoi(date.substr(12, 4));
+                        int hour = std::stoi(date.substr(17, 2));
+                        int min  = std::stoi(date.substr(20, 2));
+
+                        static const char *months[] = {
+                            "Jan","Feb","Mar","Apr","May","Jun",
+                            "Jul","Aug","Sep","Oct","Nov","Dec"
+                        };
+                        int month = -1;
+                        for (int i = 0; i < 12; ++i) {
+                            if (mon == months[i]) { month = i; break; }
+                        }
+
+                        if (month >= 0) {
+                            std::tm tm = {};
+                            tm.tm_year = year - 1900;
+                            tm.tm_mon  = month;
+                            tm.tm_mday = day;
+                            tm.tm_hour = hour;
+                            tm.tm_min  = min;
+                            tm.tm_sec  = 0;
+                            tm.tm_isdst = 0; // UTC, no DST
+
+                            time_t utc_time = _mkgmtime(&tm);
+                            std::tm local_tm = {};
+                            localtime_s(&local_tm, &utc_time);
+
+                            char buf[64];
+                            std::strftime(buf, sizeof(buf), "%b %d, %Y %H:%M:%S", &local_tm);
+                            ImGui::TextWrapped("%s", buf);
+                        } else {
+                            ImGui::TextWrapped("%s", date.c_str());
+                        }
                     }
+
                     ImGui::Spacing();
-                    ImGui::Separator();
-                    if (ImGui::Button("Yes, updated")) {
+                    if (ImGui::Button("Updated")) {
                         // Update the active branch's build_id in branches.json
                         for (auto &branch : settings->branches) {
                             if (branch.active) {
@@ -1284,7 +1348,7 @@ void Steam_Overlay::build_notifications(float width, float height)
                             }
                         }
                         save_branches_json(settings->branches, local_storage);
-                        it->start_time = {}; // expire notification
+                        it->expired = true;
                     }
                     ImGui::SameLine();
                     if (ImGui::Button("Get update")) {
@@ -1295,8 +1359,9 @@ void Steam_Overlay::build_notifications(float width, float height)
                     }
                     ImGui::SameLine();
                     if (ImGui::SmallButton("X")) {
-                        it->start_time = {}; // expire notification
+                        it->expired = true;
                     }
+                    ImGui::PopStyleVar();
                 }
                 break;
 
@@ -1622,12 +1687,21 @@ void Steam_Overlay::overlay_render_proc()
 
     // Check for pending game update notification
     if (settings->pending_update_available) {
-        std::string msg = "Update available";
+        std::string msg;
         if (settings->pending_update_version.size()) {
-            msg += ": " + settings->pending_update_version;
-        }
-        if (settings->pending_update_date.size()) {
-            msg += " (" + settings->pending_update_date + ")";
+            msg = settings->pending_update_version;
+            static const std::string steamdb_label = "(SteamDB Build ";
+            auto pos = msg.find(steamdb_label);
+            if (pos != std::string::npos) {
+                auto build_start = pos + steamdb_label.size();
+                auto build_end = msg.find(")", build_start);
+                if (build_end != std::string::npos) {
+                    msg = msg.substr(0, pos) + "("
+                        + msg.substr(build_start, build_end - build_start) + ")";
+                }
+            }
+        } else {
+            msg = "Update available";
         }
         submit_notification(notification_type::game_update, msg);
         settings->pending_update_available = false;
@@ -1867,6 +1941,7 @@ void Steam_Overlay::render_main_window()
                             case notification_type::achievement: type_label = "Achievement"; break;
                             case notification_type::achievement_progress: type_label = "Progress"; break;
                             case notification_type::auto_accept_invite: type_label = "Auto-Invite"; break;
+                            case notification_type::game_update: type_label = "Update"; break;
                         }
 
                         // For achievements the message contains "title\ndescription"

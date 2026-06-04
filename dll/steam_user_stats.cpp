@@ -703,36 +703,40 @@ void Steam_User_Stats::fetch_and_check_game_update()
         return;
     }
 
-    // Parse the version string from the first <title> after the first <item>
-    // Format: <title>Mina the Hollower update for 4 June 2026</title>
-    // But the <description> has: Version 1.0.5 [r148188] (SteamDB Build 23559724)
+    // Find the first <item> so we can parse item-level fields
+    // (channel-level <description> appears before <item> and would be wrong)
     std::string version_str;
-    auto desc_start = response.find("<description>");
-    if (desc_start != std::string::npos) {
-        auto desc_content_start = desc_start + 13; // length of "<description>"
-        auto desc_end = response.find("</description>", desc_content_start);
-        if (desc_end != std::string::npos) {
-            version_str = response.substr(desc_content_start, desc_end - desc_content_start);
-            // Remove CDATA if present
-            auto cdata_start = version_str.find("<![CDATA[");
-            if (cdata_start != std::string::npos) {
-                cdata_start += 9; // length of "<![CDATA["
-                auto cdata_end = version_str.find("]]>", cdata_start);
-                if (cdata_end != std::string::npos) {
-                    version_str = version_str.substr(cdata_start, cdata_end - cdata_start);
+    std::string date_str;
+    auto item_start = response.find("<item>");
+    if (item_start != std::string::npos) {
+        // Parse the <description> within the first <item>
+        // Format: <description><![CDATA[Version 1.0.5 [r148188] (SteamDB Build 23559724)]]></description>
+        auto desc_start = response.find("<description>", item_start);
+        if (desc_start != std::string::npos) {
+            auto desc_content_start = desc_start + 13; // length of "<description>"
+            auto desc_end = response.find("</description>", desc_content_start);
+            if (desc_end != std::string::npos) {
+                version_str = response.substr(desc_content_start, desc_end - desc_content_start);
+                // Remove CDATA if present
+                auto cdata_start = version_str.find("<![CDATA[");
+                if (cdata_start != std::string::npos) {
+                    cdata_start += 9; // length of "<![CDATA["
+                    auto cdata_end = version_str.find("]]>", cdata_start);
+                    if (cdata_end != std::string::npos) {
+                        version_str = version_str.substr(cdata_start, cdata_end - cdata_start);
+                    }
                 }
             }
         }
-    }
 
-    // Parse the pubDate from the first <item>
-    std::string date_str;
-    auto pubdate_start = response.find("<pubDate>");
-    if (pubdate_start != std::string::npos) {
-        auto pubdate_content_start = pubdate_start + 9; // length of "<pubDate>"
-        auto pubdate_end = response.find("</pubDate>", pubdate_content_start);
-        if (pubdate_end != std::string::npos) {
-            date_str = response.substr(pubdate_content_start, pubdate_end - pubdate_content_start);
+        // Parse the <pubDate> within the first <item>
+        auto pubdate_start = response.find("<pubDate>", item_start);
+        if (pubdate_start != std::string::npos) {
+            auto pubdate_content_start = pubdate_start + 9; // length of "<pubDate>"
+            auto pubdate_end = response.find("</pubDate>", pubdate_content_start);
+            if (pubdate_end != std::string::npos) {
+                date_str = response.substr(pubdate_content_start, pubdate_end - pubdate_content_start);
+            }
         }
     }
 
