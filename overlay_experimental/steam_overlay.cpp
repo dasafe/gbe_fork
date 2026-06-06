@@ -22,6 +22,17 @@
 
 #include "dll/dll.h"
 #include "dll/settings_parser.h"
+#include "dll/screenshot_format.h"
+
+// image loading for gallery thumbnails
+// local_storage.cpp already defines the IMPLEMENTATION with _STATIC,
+// so we must do the same here to avoid linker errors (each .obj gets its own private copy).
+#define STB_IMAGE_STATIC
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb/stb_image.h"
+#define STB_IMAGE_RESIZE_STATIC
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include "stb/stb_image_resize2.h"
 
 // translation
 #include "overlay/steam_overlay_translations.h"
@@ -144,6 +155,55 @@ void Steam_Overlay::parse_key_combo()
     }
 }
 
+void Steam_Overlay::parse_screenshot_key_combo()
+{
+    static const std::unordered_map<InGameOverlay::ToggleKey, std::string_view> KEYS_MAP {
+        { InGameOverlay::ToggleKey::SHIFT, "shift" },
+        { InGameOverlay::ToggleKey::CTRL,  "ctrl"  },
+        { InGameOverlay::ToggleKey::ALT,   "alt"   },
+        { InGameOverlay::ToggleKey::TAB,   "tab"   },
+        { InGameOverlay::ToggleKey::F1,    "fn1"   },
+        { InGameOverlay::ToggleKey::F2,    "fn2"   },
+        { InGameOverlay::ToggleKey::F3,    "fn3"   },
+        { InGameOverlay::ToggleKey::F4,    "fn4"   },
+        { InGameOverlay::ToggleKey::F5,    "fn5"   },
+        { InGameOverlay::ToggleKey::F6,    "fn6"   },
+        { InGameOverlay::ToggleKey::F7,    "fn7"   },
+        { InGameOverlay::ToggleKey::F8,    "fn8"   },
+        { InGameOverlay::ToggleKey::F9,    "fn9"   },
+        { InGameOverlay::ToggleKey::F10,   "fn10"  },
+        { InGameOverlay::ToggleKey::F11,   "fn11"  },
+        { InGameOverlay::ToggleKey::F12,   "fn12"  },
+    };
+
+    std::unordered_set<InGameOverlay::ToggleKey> keys_combo{};
+    bool use_default = false;
+    if (settings->overlay_screenshot_keys.empty()) {
+        use_default = true;
+    } else {
+        for (const auto &key_name : settings->overlay_screenshot_keys) {
+            auto key_it = std::find_if(KEYS_MAP.cbegin(), KEYS_MAP.cend(), [&key_name](decltype(*KEYS_MAP.cbegin()) const &item) {
+                return common_helpers::str_cmp_insensitive(item.second, key_name);
+            });
+            if (KEYS_MAP.cend() != key_it) {
+                keys_combo.insert(key_it->first);
+            } else {
+                use_default = true;
+                PRINT_DEBUG("[X] Unknown screenshot key '%s', using default F12", key_name.c_str());
+                break;
+            }
+        }
+    }
+
+    if (use_default) {
+        screenshot_keys = {
+            InGameOverlay::ToggleKey::F12
+        };
+    } else {
+        screenshot_keys = std::vector<InGameOverlay::ToggleKey>(keys_combo.begin(), keys_combo.end());
+    }
+}
+
 Steam_Overlay::Steam_Overlay(Settings* settings, Local_Storage *local_storage, SteamCallResults* callback_results, SteamCallBacks* callbacks, RunEveryRunCB* run_every_runcb, Networking* network, PlaytimeCounter* playtime_counter) :
     settings(settings),
     local_storage(local_storage),
@@ -177,6 +237,7 @@ Steam_Overlay::Steam_Overlay(Settings* settings, Local_Storage *local_storage, S
     );
 
     parse_key_combo();
+    parse_screenshot_key_combo();
     strncpy(username_text, settings->get_local_name(), sizeof(username_text));
 
     // we need these copies to show the warning only once, then disable the flag
@@ -277,6 +338,14 @@ bool Steam_Overlay::renderer_hook_proc()
 
     bool started = _renderer->StartHook(overlay_toggle_callback, toggle_keys.data(), (int)toggle_keys.size(), &fonts_atlas);
     PRINT_DEBUG("started renderer hook (result=%i)", (int)started);
+
+    // Register screenshot callback
+    _renderer->SetScreenshotCallback(&Steam_Overlay::on_screenshot_captured, this);
+
+    // Wire up TriggerScreenshot API to use the overlay renderer
+    get_steam_client()->steam_screenshots->overlay_take_screenshot = [this]() {
+        if (_renderer) _renderer->TakeScreenshot(InGameOverlay::ScreenshotType_t::BeforeOverlay);
+    };
 
     return true;
 }
@@ -694,6 +763,7 @@ bool Steam_Overlay::submit_notification(
         case notification_type::auto_accept_invite:
         case notification_type::message:
         case notification_type::game_update:
+        case notification_type::screenshot:
             // nothing
         break;
 
@@ -921,6 +991,9 @@ std::chrono::milliseconds Steam_Overlay::get_notification_duration(notification_
 
     case notification_type::game_update:
         return std::chrono::hours(24); // stay until user clicks a button
+
+    case notification_type::screenshot:
+        return std::chrono::milliseconds(settings->overlay_appearance.notification_duration_screenshot);
     }
 
     PRINT_DEBUG("ERROR unhandled type %i", (int)type);
@@ -1199,6 +1272,7 @@ void Steam_Overlay::build_notifications(float width, float height)
 
             case notification_type::invite:
             case notification_type::game_update:
+            case notification_type::screenshot:
                 // nothing (needs input for buttons)
             break;
 
@@ -1271,6 +1345,7 @@ void Steam_Overlay::build_notifications(float width, float height)
                 break;
 
                 case notification_type::auto_accept_invite:
+                case notification_type::screenshot:
                     ImGui::TextWrapped("%s", it->message.c_str());
                 break;
 
@@ -1487,6 +1562,7 @@ void Steam_Overlay::build_notifications(float width, float height)
                 case notification_type::auto_accept_invite:
                 case notification_type::message:
                 case notification_type::game_update:
+                case notification_type::screenshot:
                     // nothing
                 break;
 
@@ -1707,9 +1783,124 @@ void Steam_Overlay::overlay_render_proc()
         settings->pending_update_available = false;
     }
 
+    // -- Screenshot hotkey detection --
+    if (_renderer && !screenshot_keys.empty()) {
+#ifdef __WINDOWS__
+        // Map ToggleKey to Windows VK codes and check state
+        auto toggleKeyToVK = [](InGameOverlay::ToggleKey key) -> int {
+            switch (key) {
+                case InGameOverlay::ToggleKey::SHIFT: return VK_SHIFT;
+                case InGameOverlay::ToggleKey::CTRL:  return VK_CONTROL;
+                case InGameOverlay::ToggleKey::ALT:   return VK_MENU;
+                case InGameOverlay::ToggleKey::TAB:   return VK_TAB;
+                case InGameOverlay::ToggleKey::F1:    return VK_F1;
+                case InGameOverlay::ToggleKey::F2:    return VK_F2;
+                case InGameOverlay::ToggleKey::F3:    return VK_F3;
+                case InGameOverlay::ToggleKey::F4:    return VK_F4;
+                case InGameOverlay::ToggleKey::F5:    return VK_F5;
+                case InGameOverlay::ToggleKey::F6:    return VK_F6;
+                case InGameOverlay::ToggleKey::F7:    return VK_F7;
+                case InGameOverlay::ToggleKey::F8:    return VK_F8;
+                case InGameOverlay::ToggleKey::F9:    return VK_F9;
+                case InGameOverlay::ToggleKey::F10:   return VK_F10;
+                case InGameOverlay::ToggleKey::F11:   return VK_F11;
+                case InGameOverlay::ToggleKey::F12:   return VK_F12;
+                default: return 0;
+            }
+        };
+
+        bool all_pressed = true;
+        for (auto k : screenshot_keys) {
+            int vk = toggleKeyToVK(k);
+            if (!vk || !(GetAsyncKeyState(vk) & 0x8000)) {
+                all_pressed = false;
+                break;
+            }
+        }
+
+        // Rising edge detection + cooldown (1 second).
+        // `prev_initialized` ensures we don't fire a false trigger on the first call when the
+        // user happens to be holding the hotkey when the overlay is first loaded.
+        static bool prev_screenshot_keys = false;
+        static bool prev_initialized = false;
+        static std::chrono::steady_clock::time_point last_screenshot_time_local{};
+        auto now_local = std::chrono::steady_clock::now();
+        bool rising_edge = false;
+        if (prev_initialized) {
+            rising_edge = all_pressed && !prev_screenshot_keys;
+        }
+        prev_screenshot_keys = all_pressed;
+        prev_initialized = true;
+
+        if (rising_edge && (now_local - last_screenshot_time_local) > std::chrono::seconds(1)) {
+            last_screenshot_time_local = now_local;
+            PRINT_DEBUG("Screenshot hotkey triggered");
+            _renderer->TakeScreenshot(InGameOverlay::ScreenshotType_t::BeforeOverlay);
+        }
+#else
+        // Non-Windows: use ToggleKey to ImGui mapping
+        auto toggleKeyToImGui = [](InGameOverlay::ToggleKey key) -> ImGuiKey {
+            switch (key) {
+                case InGameOverlay::ToggleKey::SHIFT: return ImGuiKey_LeftShift;
+                case InGameOverlay::ToggleKey::CTRL:  return ImGuiKey_LeftCtrl;
+                case InGameOverlay::ToggleKey::ALT:   return ImGuiKey_LeftAlt;
+                case InGameOverlay::ToggleKey::TAB:   return ImGuiKey_Tab;
+                case InGameOverlay::ToggleKey::F1:    return ImGuiKey_F1;
+                case InGameOverlay::ToggleKey::F2:    return ImGuiKey_F2;
+                case InGameOverlay::ToggleKey::F3:    return ImGuiKey_F3;
+                case InGameOverlay::ToggleKey::F4:    return ImGuiKey_F4;
+                case InGameOverlay::ToggleKey::F5:    return ImGuiKey_F5;
+                case InGameOverlay::ToggleKey::F6:    return ImGuiKey_F6;
+                case InGameOverlay::ToggleKey::F7:    return ImGuiKey_F7;
+                case InGameOverlay::ToggleKey::F8:    return ImGuiKey_F8;
+                case InGameOverlay::ToggleKey::F9:    return ImGuiKey_F9;
+                case InGameOverlay::ToggleKey::F10:   return ImGuiKey_F10;
+                case InGameOverlay::ToggleKey::F11:   return ImGuiKey_F11;
+                case InGameOverlay::ToggleKey::F12:   return ImGuiKey_F12;
+                default: return ImGuiKey_None;
+            }
+        };
+
+        bool all_pressed = true;
+        for (auto k : screenshot_keys) {
+            ImGuiKey ik = toggleKeyToImGui(k);
+            if (ik == ImGuiKey_None || !ImGui::IsKeyDown(ik)) {
+                all_pressed = false;
+                break;
+            }
+        }
+
+        // Rising edge detection + cooldown (1 second). Skip the first frame so we don't
+        // trigger a false-positive if the user is already holding the hotkey.
+        static bool prev_screenshot_keys = false;
+        static bool prev_initialized = false;
+        static std::chrono::steady_clock::time_point last_screenshot_time_local{};
+        auto now_local = std::chrono::steady_clock::now();
+        bool rising_edge = false;
+        if (prev_initialized) {
+            rising_edge = all_pressed && !prev_screenshot_keys;
+        }
+        prev_screenshot_keys = all_pressed;
+        prev_initialized = true;
+
+        if (rising_edge && (now_local - last_screenshot_time_local) > std::chrono::seconds(1)) {
+            last_screenshot_time_local = now_local;
+            PRINT_DEBUG("Screenshot hotkey triggered");
+            _renderer->TakeScreenshot(InGameOverlay::ScreenshotType_t::BeforeOverlay);
+        }
+#endif
+    }
+
+    // Process any captured screenshots and save them to disk
+    process_captured_screenshots();
+
     if (show_overlay) {
         render_main_window();
+        render_gallery_window();
     }
+
+    // Pinned screenshot (always rendered when active, click-through when overlay closed)
+    render_pinned_screenshot();
 
     if (notifications.size()) {
         ImGuiIO &io = ImGui::GetIO();
@@ -1881,6 +2072,12 @@ void Steam_Overlay::render_main_window()
             show_notification_history = !show_notification_history;
         }
 
+        ImGui::SameLine();
+        // user clicked on "Screenshots"
+        if (ImGui::Button("Screenshots")) {
+            show_screenshots_window = !show_screenshots_window;
+        }
+
         ImGui::Spacing();
         ImGui::Spacing();
         // user clicked on "FPS"
@@ -1942,6 +2139,7 @@ void Steam_Overlay::render_main_window()
                             case notification_type::achievement_progress: type_label = "Progress"; break;
                             case notification_type::auto_accept_invite: type_label = "Auto-Invite"; break;
                             case notification_type::game_update: type_label = "Update"; break;
+                            case notification_type::screenshot: type_label = "Screenshot"; break;
                         }
 
                         // For achievements the message contains "title\ndescription"
@@ -2386,6 +2584,34 @@ void Steam_Overlay::UnSetupOverlay()
                 }
             }
 
+            // Unload screenshot textures
+            for (auto &item : screenshot_items) {
+                if (item.texture) {
+                    if (item.texture->GetResourceId() != 0)
+                        item.texture->Unload();
+                    item.texture->Delete();
+                }
+            }
+            screenshot_items.clear();
+            preview_pixels.clear();
+            preview_pixels_w = 0;
+            preview_pixels_h = 0;
+            pinned_pixels.clear();
+            pinned_pixels_w = 0;
+            pinned_pixels_h = 0;
+            if (preview_texture) {
+                if (preview_texture->GetResourceId() != 0)
+                    preview_texture->Unload();
+                preview_texture->Delete();
+                preview_texture = nullptr;
+            }
+            if (pinned_texture) {
+                if (pinned_texture->GetResourceId() != 0)
+                    pinned_texture->Unload();
+                pinned_texture->Delete();
+                pinned_texture = nullptr;
+            }
+
             // manually calling this dtor looks bad, but it actually prevents a lot of crashes on exit, don't remove it!
             // many DX12 games will crash on exit if the hook wasn't manually removed (ex appid 2933080, 1583230)
             _renderer->~RendererHook_t();
@@ -2826,6 +3052,525 @@ void Steam_Overlay::networking_msg_received(Common_Message *msg)
             notify_sound_user_invite(friend_info->second);
         }
     }
+}
+
+// -- Screenshot capture callback --
+void Steam_Overlay::on_screenshot_captured(const InGameOverlay::ScreenshotCallbackParameter_t* screenshot, void* userParameter)
+{
+    auto* self = static_cast<Steam_Overlay*>(userParameter);
+    if (!screenshot || !screenshot->Data || screenshot->Width == 0 || screenshot->Height == 0)
+        return;
+
+    auto pixels = ScreenshotFormat::ConvertToRGBA(screenshot, 4);
+    if (pixels.empty())
+        return;
+
+    CapturedScreenshot item;
+    item.width = screenshot->Width;
+    item.height = screenshot->Height;
+    item.pixels_rgb = std::move(pixels);
+
+    std::lock_guard<std::mutex> lock(self->captured_screenshots_mutex);
+    self->captured_screenshots_queue.push_back(std::move(item));
+}
+
+void Steam_Overlay::process_captured_screenshots()
+{
+    std::vector<CapturedScreenshot> batch;
+    {
+        std::lock_guard<std::mutex> lock(captured_screenshots_mutex);
+        if (captured_screenshots_queue.empty()) return;
+        batch.swap(captured_screenshots_queue);
+    }
+
+    for (auto& item : batch) {
+        char buff[128];
+        auto now = std::chrono::system_clock::now();
+        auto now_time = std::chrono::system_clock::to_time_t(now);
+        struct tm local_tm{};
+#ifdef _MSC_VER
+        localtime_s(&local_tm, &now_time);
+#else
+        localtime_r(&now_time, &local_tm);
+#endif
+        std::strftime(buff, sizeof(buff), "%a_%b_%d_%H_%M_%S_%Y", &local_tm);
+        std::string filename = buff;
+        filename += ".png";
+
+        if (local_storage->save_screenshot(filename, item.pixels_rgb.data(), item.width, item.height, 4)) {
+            PRINT_DEBUG("Screenshot saved: %s", filename.c_str());
+            submit_notification(notification_type::screenshot, "Screenshot saved: " + filename);
+        } else {
+            PRINT_DEBUG("Failed to save screenshot!");
+        }
+    }
+
+    refresh_screenshots_list();
+}
+
+// -- Screenshots directory scanning --
+void Steam_Overlay::refresh_screenshots_list()
+{
+    // Unload existing textures
+    for (auto& item : screenshot_items) {
+        if (item.texture) {
+            if (item.texture->GetResourceId() != 0)
+                item.texture->Unload();
+            item.texture->Delete();
+        }
+    }
+    screenshot_items.clear();
+
+    std::string path = local_storage->get_path(Local_Storage::screenshots_folder);
+    auto filenames = Local_Storage::get_filenames_path(path);
+
+    for (auto& f : filenames) {
+        if (f.size() < 4) continue;
+        std::string ext = f.substr(f.size() - 4);
+        if (ext != ".png" && ext != ".PNG") continue;
+
+        ScreenshotItem item;
+        item.filename = f;
+        item.full_path = path + PATH_SEPARATOR + f;
+        if (_renderer)
+            item.texture = _renderer->CreateResource();
+        screenshot_items.push_back(std::move(item));
+    }
+
+    screenshots_loaded = true;
+}
+
+// -- Gallery window --
+void Steam_Overlay::render_gallery_window()
+{
+    if (!show_screenshots_window) return;
+
+    ImGui::PushFont(font_default);
+    uint32 style_color_stack = apply_global_style_color();
+
+    ImGui::SetNextWindowSizeConstraints(ImVec2(400, 300), ImVec2(8192, 8192));
+    ImGui::SetNextWindowBgAlpha(1.0f);
+    if (ImGui::Begin("Screenshots", &show_screenshots_window)) {
+        // Delete/Unpin toolbar
+        bool has_selection = false;
+        for (auto& item : screenshot_items) {
+            if (item.selected) { has_selection = true; break; }
+        }
+
+        if (!pinned_screenshot_path.empty()) {
+            if (ImGui::SmallButton("Unpin current")) {
+                if (pinned_texture) {
+                    if (pinned_texture->GetResourceId() != 0)
+                        pinned_texture->Unload();
+                    pinned_texture->Delete();
+                    pinned_texture = nullptr;
+                }
+                pinned_pixels.clear();
+                pinned_pixels_w = 0;
+                pinned_pixels_h = 0;
+                pinned_screenshot_path.clear();
+                pinned_pos_set = false;
+            }
+            ImGui::SameLine();
+        }
+
+        if (has_selection) {
+            if (ImGui::SmallButton("Delete selected")) {
+                delete_all_selected = true;
+                show_delete_confirmation = true;
+                delete_confirm_open_active = true;
+            }
+            ImGui::SameLine();
+        }
+
+        if (!screenshot_items.empty()) {
+            if (ImGui::SmallButton("Refresh")) {
+                refresh_screenshots_list();
+            }
+        }
+
+        ImGui::Separator();
+
+        if (screenshot_items.empty()) {
+            if (!screenshots_loaded)
+                refresh_screenshots_list();
+            if (screenshot_items.empty()) {
+                ImGui::TextDisabled("No screenshots yet");
+            }
+        }
+
+        // Thumbnail grid
+        if (!screenshot_items.empty()) {
+            const float thumb_width = 160.0f;
+            const float thumb_height = 90.0f;
+            const float spacing = ImGui::GetStyle().ItemSpacing.x;
+            float window_visible_x = ImGui::GetContentRegionAvail().x;
+            int columns = std::max(1, (int)(window_visible_x / (thumb_width + spacing)));
+
+            ImGui::Columns(columns, "##screenshot_grid", false);
+
+            for (auto& item : screenshot_items) {
+                ImGui::PushID(item.filename.c_str());
+
+                // Load thumbnail texture lazily
+                if (item.texture && item.texture->GetResourceId() == 0 && !item.failed_to_load) {
+                    int img_w = 0, img_h = 0;
+                    unsigned char* img = stbi_load(item.full_path.c_str(), &img_w, &img_h, nullptr, 4);
+                    if (img) {
+                        // Downscale to thumbnail. We resize directly into the item's persistent
+                        // storage so the pointer stays valid for the GPU upload.
+                        item.thumbnail_pixels.assign((size_t)thumb_width * (size_t)thumb_height * 4, 0);
+                        stbir_resize_uint8_linear(img, img_w, img_h, 0,
+                            item.thumbnail_pixels.data(), (int)thumb_width, (int)thumb_height, 0, STBIR_RGBA);
+                        item.texture->AttachResource(item.thumbnail_pixels.data(), (uint32_t)thumb_width, (uint32_t)thumb_height);
+                        stbi_image_free(img);
+                    } else {
+                        item.failed_to_load = true;
+                    }
+                }
+
+                // Selection checkbox
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2, 2));
+                ImGui::Checkbox("##sel", &item.selected);
+                ImGui::PopStyleVar();
+                ImGui::SameLine();
+
+                // Thumbnail image button
+                if (item.texture && item.texture->GetResourceId() != 0) {
+                    if (ImGui::ImageButton("##thumb", item.texture->GetResourceId(), ImVec2(thumb_width, thumb_height))) {
+                        preview_screenshot_path = item.full_path;
+                    }
+                } else {
+                    // Fallback placeholder
+                    ImGui::InvisibleButton("##thumb_placeholder", ImVec2(thumb_width, thumb_height));
+                }
+
+                // Right-click context menu
+                if (ImGui::BeginPopupContextItem("##screenshot_ctx")) {
+                    if (ImGui::Selectable("Pin")) {
+                        if (!pinned_screenshot_path.empty() && pinned_texture) {
+                            if (pinned_texture->GetResourceId() != 0)
+                                pinned_texture->Unload();
+                            pinned_texture->Delete();
+                        }
+                        pinned_pixels.clear();
+                        pinned_pixels_w = 0;
+                        pinned_pixels_h = 0;
+                        pinned_screenshot_path = item.full_path;
+                        pinned_texture = _renderer ? _renderer->CreateResource() : nullptr;
+                        pinned_pos_set = false;
+
+                        // Load full image for pinning. Copy into pinned_pixels so the data
+                        // outlives this scope (AttachResource does NOT take ownership).
+                        int img_w = 0, img_h = 0;
+                        unsigned char* img = stbi_load(item.full_path.c_str(), &img_w, &img_h, nullptr, 4);
+                        if (img && pinned_texture) {
+                            pinned_pixels.assign(img, img + ((size_t)img_w * (size_t)img_h * 4));
+                            pinned_pixels_w = (uint32_t)img_w;
+                            pinned_pixels_h = (uint32_t)img_h;
+                            pinned_texture->AttachResource(pinned_pixels.data(), pinned_pixels_w, pinned_pixels_h);
+                            pinned_size = ImVec2((float)img_w, (float)img_h);
+                            // Cap max pinned size
+                            float max_dim = 500.0f;
+                            if (pinned_size.x > max_dim || pinned_size.y > max_dim) {
+                                float scale = std::min(max_dim / pinned_size.x, max_dim / pinned_size.y);
+                                pinned_size.x *= scale;
+                                pinned_size.y *= scale;
+                            }
+                            stbi_image_free(img);
+                        }
+                    }
+                    if (ImGui::Selectable("Delete")) {
+                        single_delete_path = item.full_path;
+                        delete_all_selected = false;
+                        show_delete_confirmation = true;
+                        delete_confirm_open_active = true;
+                    }
+                    ImGui::EndPopup();
+                }
+
+                // Filename label
+                ImGui::TextWrapped("%s", item.filename.c_str());
+                ImGui::NextColumn();
+
+                ImGui::PopID();
+            }
+            ImGui::Columns(1);
+        }
+
+        // -- Preview popup --
+        if (!preview_screenshot_path.empty() || preview_open_active) {
+            // Open the popup if we have a pending path
+            if (!preview_screenshot_path.empty()) {
+                ImGui::OpenPopup("Screenshot Preview");
+                preview_open_active = true;
+            }
+            if (ImGui::BeginPopupModal("Screenshot Preview", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                // Load preview texture lazily
+                if (preview_texture == nullptr) {
+                    preview_texture = _renderer ? _renderer->CreateResource() : nullptr;
+                }
+                if (preview_texture && preview_texture->GetResourceId() == 0) {
+                    int img_w = 0, img_h = 0;
+                    unsigned char* img = stbi_load(preview_screenshot_path.c_str(), &img_w, &img_h, nullptr, 4);
+                    if (img) {
+                        // Downscale if too large for screen. Store pixels in preview_pixels
+                        // so the pointer is valid for the GPU upload.
+                        float max_w = ImGui::GetIO().DisplaySize.x * 0.8f;
+                        float max_h = ImGui::GetIO().DisplaySize.y * 0.8f;
+                        float scale = std::min(1.0f, std::min(max_w / (float)img_w, max_h / (float)img_h));
+                        if (scale < 1.0f) {
+                            int new_w = (int)(img_w * scale);
+                            int new_h = (int)(img_h * scale);
+                            preview_pixels.assign((size_t)new_w * (size_t)new_h * 4, 0);
+                            stbir_resize_uint8_linear(img, img_w, img_h, 0,
+                                preview_pixels.data(), new_w, new_h, 0, STBIR_RGBA);
+                            preview_pixels_w = (uint32_t)new_w;
+                            preview_pixels_h = (uint32_t)new_h;
+                            preview_texture->AttachResource(preview_pixels.data(), preview_pixels_w, preview_pixels_h);
+                        } else {
+                            preview_pixels.assign(img, img + ((size_t)img_w * (size_t)img_h * 4));
+                            preview_pixels_w = (uint32_t)img_w;
+                            preview_pixels_h = (uint32_t)img_h;
+                            preview_texture->AttachResource(preview_pixels.data(), preview_pixels_w, preview_pixels_h);
+                        }
+                        stbi_image_free(img);
+                    }
+                }
+
+                if (preview_texture && preview_texture->GetResourceId() != 0) {
+                    ImGui::Image(preview_texture->GetResourceId(), ImVec2((float)preview_pixels_w, (float)preview_pixels_h));
+                }
+
+                // Buttons
+                if (ImGui::Button("Pin")) {
+                    // Pin from preview
+                    if (!pinned_screenshot_path.empty() && pinned_texture) {
+                        if (pinned_texture->GetResourceId() != 0)
+                            pinned_texture->Unload();
+                        pinned_texture->Delete();
+                    }
+                    pinned_pixels.clear();
+                    pinned_pixels_w = 0;
+                    pinned_pixels_h = 0;
+                    pinned_screenshot_path = preview_screenshot_path;
+                    pinned_texture = _renderer ? _renderer->CreateResource() : nullptr;
+                    pinned_pos_set = false;
+
+                    int img_w = 0, img_h = 0;
+                    unsigned char* img = stbi_load(pinned_screenshot_path.c_str(), &img_w, &img_h, nullptr, 4);
+                    if (img && pinned_texture) {
+                        pinned_pixels.assign(img, img + ((size_t)img_w * (size_t)img_h * 4));
+                        pinned_pixels_w = (uint32_t)img_w;
+                        pinned_pixels_h = (uint32_t)img_h;
+                        pinned_texture->AttachResource(pinned_pixels.data(), pinned_pixels_w, pinned_pixels_h);
+                        pinned_size = ImVec2((float)img_w, (float)img_h);
+                        float max_dim = 500.0f;
+                        if (pinned_size.x > max_dim || pinned_size.y > max_dim) {
+                            float scale = std::min(max_dim / pinned_size.x, max_dim / pinned_size.y);
+                            pinned_size.x *= scale;
+                            pinned_size.y *= scale;
+                        }
+                        stbi_image_free(img);
+                    }
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Delete")) {
+                    single_delete_path = preview_screenshot_path;
+                    delete_all_selected = false;
+                    show_delete_confirmation = true;
+                    delete_confirm_open_active = true;
+                    // Close the preview immediately and clear its state so it doesn't
+                    // re-open on the next frame on top of the confirm modal
+                    ImGui::CloseCurrentPopup();
+                    preview_open_active = false;
+                    preview_screenshot_path.clear();
+                    if (preview_texture) {
+                        if (preview_texture->GetResourceId() != 0)
+                            preview_texture->Unload();
+                        preview_texture->Delete();
+                        preview_texture = nullptr;
+                    }
+                    preview_pixels.clear();
+                    preview_pixels_w = 0;
+                    preview_pixels_h = 0;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Close")) {
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            } else {
+                // Modal returned false: either it was just closed, or never opened
+                if (preview_open_active) {
+                    // User closed it - cleanup
+                    preview_screenshot_path.clear();
+                    if (preview_texture) {
+                        if (preview_texture->GetResourceId() != 0)
+                            preview_texture->Unload();
+                        preview_texture->Delete();
+                        preview_texture = nullptr;
+                    }
+                    preview_pixels.clear();
+                    preview_pixels_w = 0;
+                    preview_pixels_h = 0;
+                    preview_open_active = false;
+                }
+            }
+        }
+
+        // -- Delete confirmation modal --
+        if (show_delete_confirmation || delete_confirm_open_active) {
+            if (show_delete_confirmation) {
+                ImGui::OpenPopup("Confirm Delete");
+                delete_confirm_open_active = true;
+                show_delete_confirmation = false; // consumed - the active flag carries the state
+            }
+            if (ImGui::BeginPopupModal("Confirm Delete", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                if (delete_all_selected) {
+                    ImGui::Text("Delete all selected screenshots?");
+                } else {
+                    ImGui::Text("Delete this screenshot?");
+                }
+                ImGui::Separator();
+                if (ImGui::Button("Yes")) {
+                    if (delete_all_selected) {
+                        // Delete all selected
+                        for (auto& item : screenshot_items) {
+                            if (!item.selected) continue;
+                            local_storage->file_delete(Local_Storage::screenshots_folder, item.filename);
+                            // Also delete the .json metadata if it exists
+                            std::string json_name = item.filename.substr(0, item.filename.size() - 4) + ".json";
+                            local_storage->file_delete(Local_Storage::screenshots_folder, json_name);
+                        }
+                        refresh_screenshots_list();
+                    } else if (!single_delete_path.empty()) {
+                        // Find filename from path
+                        std::string path = local_storage->get_path(Local_Storage::screenshots_folder) + PATH_SEPARATOR;
+                        std::string filename;
+                        if (single_delete_path.find(path) == 0) {
+                            filename = single_delete_path.substr(path.size());
+                        } else {
+                            // Try just the basename
+                            auto pos = single_delete_path.find_last_of("/\\");
+                            filename = (pos != std::string::npos) ? single_delete_path.substr(pos + 1) : single_delete_path;
+                        }
+                        if (!filename.empty()) {
+                            local_storage->file_delete(Local_Storage::screenshots_folder, filename);
+                            std::string json_name = filename.substr(0, filename.size() - 4) + ".json";
+                            local_storage->file_delete(Local_Storage::screenshots_folder, json_name);
+                        }
+                        // If this was the pinned image, clear pin
+                        if (single_delete_path == pinned_screenshot_path) {
+                            if (pinned_texture) {
+                                if (pinned_texture->GetResourceId() != 0)
+                                    pinned_texture->Unload();
+                                pinned_texture->Delete();
+                                pinned_texture = nullptr;
+                            }
+                            pinned_pixels.clear();
+                            pinned_pixels_w = 0;
+                            pinned_pixels_h = 0;
+                            pinned_screenshot_path.clear();
+                            pinned_pos_set = false;
+                        }
+                        refresh_screenshots_list();
+                    }
+                    single_delete_path.clear();
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("No")) {
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            } else {
+                if (delete_confirm_open_active) {
+                    // User closed it (Yes or No handled inside the modal). Clear state.
+                    show_delete_confirmation = false;
+                    single_delete_path.clear();
+                    delete_all_selected = false;
+                    delete_confirm_open_active = false;
+                }
+            }
+        }
+    }
+    ImGui::End();
+
+    if (style_color_stack) ImGui::PopStyleColor(style_color_stack);
+    ImGui::PopFont();
+}
+
+// -- Floating pinned screenshot --
+void Steam_Overlay::render_pinned_screenshot()
+{
+    if (pinned_screenshot_path.empty() || !pinned_texture || pinned_texture->GetResourceId() == 0)
+        return;
+
+    ImGui::PushFont(font_default);
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize;
+    if (!show_overlay) {
+        // When overlay is closed: click-through, no move, no resize, no title bar
+        flags |= ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoMove
+               | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar
+               | ImGuiWindowFlags_NoBringToFrontOnFocus
+               | ImGuiWindowFlags_NoFocusOnAppearing
+               | ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoNavInputs;
+    }
+
+    if (!pinned_pos_set && show_overlay) {
+        ImGui::SetNextWindowPos(pinned_pos, ImGuiCond_FirstUseEver);
+        pinned_pos_set = true;
+    } else if (!pinned_pos_set) {
+        ImGui::SetNextWindowPos(pinned_pos, ImGuiCond_Always);
+        pinned_pos_set = true;
+    } else {
+        ImGui::SetNextWindowPos(pinned_pos, ImGuiCond_FirstUseEver);
+    }
+    ImGui::SetNextWindowSize(pinned_size, ImGuiCond_FirstUseEver);
+
+    // Set alpha for click-through mode
+    if (!show_overlay) {
+        ImGui::SetNextWindowBgAlpha(pinned_opacity);
+    }
+
+    char pin_wnd_id[64];
+    snprintf(pin_wnd_id, sizeof(pin_wnd_id), "Pinned Screenshot###pinned_ss");
+    if (ImGui::Begin(pin_wnd_id, nullptr, flags)) {
+        ImGui::Image(pinned_texture->GetResourceId(), pinned_size);
+
+        if (show_overlay) {
+            // Editable controls when overlay is open
+            ImGui::Separator();
+            ImGui::SliderFloat("Opacity", &pinned_opacity, 0.1f, 1.0f, "%.2f");
+
+            // Store position changes
+            pinned_pos = ImGui::GetWindowPos();
+            pinned_size = ImGui::GetWindowSize();
+
+            // Prevent resize from going too small
+            if (pinned_size.x < 50.0f) pinned_size.x = 50.0f;
+            if (pinned_size.y < 30.0f) pinned_size.y = 30.0f;
+
+            if (ImGui::SmallButton("Remove pin")) {
+                if (pinned_texture) {
+                    if (pinned_texture->GetResourceId() != 0)
+                        pinned_texture->Unload();
+                    pinned_texture->Delete();
+                    pinned_texture = nullptr;
+                }
+                pinned_pixels.clear();
+                pinned_pixels_w = 0;
+                pinned_pixels_h = 0;
+                pinned_screenshot_path.clear();
+                pinned_pos_set = false;
+            }
+        }
+    }
+    ImGui::End();
+
+    ImGui::PopFont();
 }
 
 

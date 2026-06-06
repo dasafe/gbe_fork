@@ -155,6 +155,7 @@ struct Overlay_Appearance {
     uint32 notification_duration_achievement = 7000; // achievement unlocked duration (millisec)
     uint32 notification_duration_invitation = 8000; // friend invitation duration (millisec)
     uint32 notification_duration_chat = 4000; // sliding animation duration duration (millisec)
+    uint32 notification_duration_screenshot = 1000; // screenshot saved duration (millisec)
 
     std::string ach_unlock_datetime_format = "%Y/%m/%d - %H:%M:%S";
     bool show_notification_history = false;
@@ -389,6 +390,7 @@ public:
     bool overlay_always_show_playtime = false;
     // keys used to toggle the overlay, default = Shift + Tab
     std::vector<std::string> overlay_toggle_keys{};
+    std::vector<std::string> overlay_screenshot_keys{};
     // minimum time interval between achievement notifications (in milliseconds)
     int achievement_notification_delay_ms = 0;
 

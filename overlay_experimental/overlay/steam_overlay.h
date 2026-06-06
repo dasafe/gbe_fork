@@ -63,6 +63,7 @@ enum class notification_type
     achievement_progress,
     auto_accept_invite,
     game_update,
+    screenshot,
 };
 
 struct Overlay_Achievement
@@ -197,6 +198,54 @@ class Steam_Overlay
     int renderer_hook_timeout_ctr{};
 
     std::vector<InGameOverlay::ToggleKey> toggle_keys{};
+    std::vector<InGameOverlay::ToggleKey> screenshot_keys{};
+
+    struct ScreenshotItem {
+        std::string filename;
+        std::string full_path;
+        InGameOverlay::RendererResource_t* texture = nullptr;
+        // Keep pixel data alive until the GPU has consumed it (AttachResource does NOT own the data)
+        std::vector<uint8_t> thumbnail_pixels{};
+        bool selected = false;
+        bool failed_to_load = false;
+    };
+
+    struct CapturedScreenshot {
+        uint32_t width;
+        uint32_t height;
+        std::vector<uint8_t> pixels_rgb;
+    };
+
+    std::vector<ScreenshotItem> screenshot_items{};
+    bool screenshots_loaded = false;
+    bool show_screenshots_window = false;
+    std::string preview_screenshot_path{};
+    InGameOverlay::RendererResource_t* preview_texture = nullptr;
+    // Persistent storage for preview/pin pixel data (AttachResource does NOT own the data)
+    std::vector<uint8_t> preview_pixels{};
+    uint32_t preview_pixels_w = 0;
+    uint32_t preview_pixels_h = 0;
+    // Pinned-window persistent pixel storage (keeps the original full image, used when the
+    // user resizes the floating window via mouse drag)
+    std::vector<uint8_t> pinned_pixels{};
+    uint32_t pinned_pixels_w = 0;
+    uint32_t pinned_pixels_h = 0;
+    bool preview_open_active = false;       // true between OpenPopup and explicit close
+    bool delete_confirm_open_active = false;
+
+    bool show_delete_confirmation = false;
+    bool delete_all_selected = false;
+    std::string single_delete_path;
+
+    std::string pinned_screenshot_path{};
+    InGameOverlay::RendererResource_t* pinned_texture = nullptr;
+    float pinned_opacity = 1.0f;
+    bool pinned_pos_set = false;
+    ImVec2 pinned_pos = { 100, 100 };
+    ImVec2 pinned_size = { 320, 180 };
+
+    std::vector<CapturedScreenshot> captured_screenshots_queue{};
+    std::mutex captured_screenshots_mutex{};
 
     // font stuff - now supporting independent font sizes
     ImFontAtlas fonts_atlas{};
@@ -223,12 +272,20 @@ class Steam_Overlay
     Steam_Overlay& operator=(Steam_Overlay&&) = delete;
 
     void parse_key_combo();
+    void parse_screenshot_key_combo();
     bool submit_notification(
         notification_type type,
         const std::string &msg,
         std::pair<const Friend, friend_window_state> *frd = nullptr,
         Overlay_Achievement *ach = nullptr
     );
+
+    void refresh_screenshots_list();
+    void render_gallery_window();
+    void render_pinned_screenshot();
+    void process_captured_screenshots();
+
+    static void on_screenshot_captured(const InGameOverlay::ScreenshotCallbackParameter_t* screenshot, void* userParameter);
 
     void notify_sound_user_invite(friend_window_state& friend_state);
     void notify_sound_user_achievement();
