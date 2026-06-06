@@ -3140,6 +3140,26 @@ void Steam_Overlay::refresh_screenshots_list()
     screenshots_loaded = true;
 }
 
+// -- Preview popup state cleanup --
+// Releases the preview's GPU texture and resets all state flags. Callers are responsible
+// for calling ImGui::CloseCurrentPopup() (or doing so in the same scope) if the popup is
+// currently open — this helper only tears down the C++ state.
+void Steam_Overlay::clear_preview_state()
+{
+    preview_screenshot_path.clear();
+    preview_open_active = false;
+    preview_index = -1;
+    if (preview_texture) {
+        if (preview_texture->GetResourceId() != 0)
+            preview_texture->Unload();
+        preview_texture->Delete();
+        preview_texture = nullptr;
+    }
+    preview_pixels.clear();
+    preview_pixels_w = 0;
+    preview_pixels_h = 0;
+}
+
 // -- Gallery window --
 void Steam_Overlay::render_gallery_window()
 {
@@ -3149,6 +3169,7 @@ void Steam_Overlay::render_gallery_window()
     uint32 style_color_stack = apply_global_style_color();
 
     ImGui::SetNextWindowSizeConstraints(ImVec2(400, 300), ImVec2(8192, 8192));
+    ImGui::SetNextWindowSize(ImVec2(700, 500), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowBgAlpha(1.0f);
     if (ImGui::Begin("Screenshots", &show_screenshots_window)) {
         // Delete/Unpin toolbar
@@ -3209,7 +3230,8 @@ void Steam_Overlay::render_gallery_window()
 
             ImGui::Columns(columns, "##screenshot_grid", false);
 
-            for (auto& item : screenshot_items) {
+            for (int idx = 0; idx < (int)screenshot_items.size(); ++idx) {
+                auto& item = screenshot_items[idx];
                 ImGui::PushID(item.filename.c_str());
 
                 // Load thumbnail texture lazily
@@ -3229,15 +3251,10 @@ void Steam_Overlay::render_gallery_window()
                     }
                 }
 
-                // Selection checkbox
-                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2, 2));
-                ImGui::Checkbox("##sel", &item.selected);
-                ImGui::PopStyleVar();
-                ImGui::SameLine();
-
-                // Thumbnail image button
+                // Thumbnail image button (on its own line so it never overflows into adjacent column)
                 if (item.texture && item.texture->GetResourceId() != 0) {
                     if (ImGui::ImageButton("##thumb", item.texture->GetResourceId(), ImVec2(thumb_width, thumb_height))) {
+                        preview_index = idx;
                         preview_screenshot_path = item.full_path;
                     }
                 } else {
@@ -3245,7 +3262,7 @@ void Steam_Overlay::render_gallery_window()
                     ImGui::InvisibleButton("##thumb_placeholder", ImVec2(thumb_width, thumb_height));
                 }
 
-                // Right-click context menu
+                // Right-click context menu (attach to the image/placeholder, not the whole cell)
                 if (ImGui::BeginPopupContextItem("##screenshot_ctx")) {
                     if (ImGui::Selectable("Pin")) {
                         if (!pinned_screenshot_path.empty() && pinned_texture) {
@@ -3271,9 +3288,9 @@ void Steam_Overlay::render_gallery_window()
                             pinned_texture->AttachResource(pinned_pixels.data(), pinned_pixels_w, pinned_pixels_h);
                             pinned_size = ImVec2((float)img_w, (float)img_h);
                             // Cap max pinned size
-                            float max_dim = 500.0f;
-                            if (pinned_size.x > max_dim || pinned_size.y > max_dim) {
-                                float scale = std::min(max_dim / pinned_size.x, max_dim / pinned_size.y);
+                            if (pinned_size.x > kContextPinMaxDim || pinned_size.y > kContextPinMaxDim) {
+                                float scale = std::min(kContextPinMaxDim / pinned_size.x,
+                                                       kContextPinMaxDim / pinned_size.y);
                                 pinned_size.x *= scale;
                                 pinned_size.y *= scale;
                             }
@@ -3289,10 +3306,14 @@ void Steam_Overlay::render_gallery_window()
                     ImGui::EndPopup();
                 }
 
-                // Filename label
+                // Checkbox + filename on a second line (within the same column)
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2, 2));
+                ImGui::Checkbox("##sel", &item.selected);
+                ImGui::PopStyleVar();
+                ImGui::SameLine();
                 ImGui::TextWrapped("%s", item.filename.c_str());
-                ImGui::NextColumn();
 
+                ImGui::NextColumn();
                 ImGui::PopID();
             }
             ImGui::Columns(1);
@@ -3300,51 +3321,107 @@ void Steam_Overlay::render_gallery_window()
 
         // -- Preview popup --
         if (!preview_screenshot_path.empty() || preview_open_active) {
-            // Open the popup if we have a pending path
-            if (!preview_screenshot_path.empty()) {
+            // Open the popup on the first frame only (not while navigating via Prev/Next)
+            if (!preview_screenshot_path.empty() && !preview_open_active) {
                 ImGui::OpenPopup("Screenshot Preview");
                 preview_open_active = true;
+
+                // Find the index for Prev/Next navigation
+                if (preview_index < 0 || preview_index >= (int)screenshot_items.size() ||
+                    screenshot_items[preview_index].full_path != preview_screenshot_path)
+                {
+                    preview_index = -1;
+                    for (int i = 0; i < (int)screenshot_items.size(); ++i) {
+                        if (screenshot_items[i].full_path == preview_screenshot_path) {
+                            preview_index = i;
+                            break;
+                        }
+                    }
+                }
+                // Set initial window size proportional to display
+                ImVec2 disp = ImGui::GetIO().DisplaySize;
+                ImGui::SetNextWindowSize(ImVec2(disp.x * 0.8f, disp.y * 0.8f), ImGuiCond_Appearing);
             }
-            if (ImGui::BeginPopupModal("Screenshot Preview", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-                // Load preview texture lazily
+            // Removed AlwaysAutoResize so the user can resize the preview window.
+            // Center the popup on screen so it never appears at a weird position.
+            ImVec2 disp_center = ImGui::GetIO().DisplaySize;
+            ImGui::SetNextWindowPos(ImVec2(disp_center.x * 0.5f, disp_center.y * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            ImGuiWindowFlags preview_flags = ImGuiWindowFlags_NoScrollbar;
+            if (ImGui::BeginPopupModal("Screenshot Preview", nullptr, preview_flags)) {
+                // Navigate to a different screenshot
+                // (path changed via Prev/Next → unload current texture so it reloads next frame)
+                if (preview_texture && preview_index >= 0 && preview_index < (int)screenshot_items.size() &&
+                    screenshot_items[preview_index].full_path != preview_screenshot_path)
+                {
+                    preview_screenshot_path = screenshot_items[preview_index].full_path;
+                    if (preview_texture) {
+                        if (preview_texture->GetResourceId() != 0)
+                            preview_texture->Unload();
+                        preview_texture->Delete();
+                        preview_texture = nullptr;
+                    }
+                    preview_pixels.clear();
+                    preview_pixels_w = 0;
+                    preview_pixels_h = 0;
+                }
+
+                // Load full-resolution preview texture (not downscaled — scaling is done
+                // at render time so the image fills the user-resizable window)
                 if (preview_texture == nullptr) {
                     preview_texture = _renderer ? _renderer->CreateResource() : nullptr;
                 }
-                if (preview_texture && preview_texture->GetResourceId() == 0) {
+                if (preview_texture && preview_texture->GetResourceId() == 0 &&
+                    preview_index >= 0 && preview_index < (int)screenshot_items.size()) {
                     int img_w = 0, img_h = 0;
-                    unsigned char* img = stbi_load(preview_screenshot_path.c_str(), &img_w, &img_h, nullptr, 4);
+                    unsigned char* img = stbi_load(screenshot_items[preview_index].full_path.c_str(), &img_w, &img_h, nullptr, 4);
                     if (img) {
-                        // Downscale if too large for screen. Store pixels in preview_pixels
-                        // so the pointer is valid for the GPU upload.
-                        float max_w = ImGui::GetIO().DisplaySize.x * 0.8f;
-                        float max_h = ImGui::GetIO().DisplaySize.y * 0.8f;
-                        float scale = std::min(1.0f, std::min(max_w / (float)img_w, max_h / (float)img_h));
-                        if (scale < 1.0f) {
-                            int new_w = (int)(img_w * scale);
-                            int new_h = (int)(img_h * scale);
-                            preview_pixels.assign((size_t)new_w * (size_t)new_h * 4, 0);
-                            stbir_resize_uint8_linear(img, img_w, img_h, 0,
-                                preview_pixels.data(), new_w, new_h, 0, STBIR_RGBA);
-                            preview_pixels_w = (uint32_t)new_w;
-                            preview_pixels_h = (uint32_t)new_h;
-                            preview_texture->AttachResource(preview_pixels.data(), preview_pixels_w, preview_pixels_h);
-                        } else {
-                            preview_pixels.assign(img, img + ((size_t)img_w * (size_t)img_h * 4));
-                            preview_pixels_w = (uint32_t)img_w;
-                            preview_pixels_h = (uint32_t)img_h;
-                            preview_texture->AttachResource(preview_pixels.data(), preview_pixels_w, preview_pixels_h);
-                        }
+                        preview_pixels.assign(img, img + ((size_t)img_w * (size_t)img_h * 4));
+                        preview_pixels_w = (uint32_t)img_w;
+                        preview_pixels_h = (uint32_t)img_h;
+                        preview_texture->AttachResource(preview_pixels.data(), preview_pixels_w, preview_pixels_h);
                         stbi_image_free(img);
                     }
                 }
 
-                if (preview_texture && preview_texture->GetResourceId() != 0) {
-                    ImGui::Image(preview_texture->GetResourceId(), ImVec2((float)preview_pixels_w, (float)preview_pixels_h));
+                // Display image scaled to fit available content, maintaining aspect ratio.
+                // Store display size so the Pin button can use it for the pinned window.
+                ImVec2 preview_display_size(0, 0);
+                if (preview_texture && preview_texture->GetResourceId() != 0 && preview_pixels_w > 0 && preview_pixels_h > 0) {
+                    ImVec2 avail = ImGui::GetContentRegionAvail();
+                    // Reserve space for the button bar at the bottom
+                    float btn_h = ImGui::GetTextLineHeightWithSpacing() * 2.0f + ImGui::GetStyle().ItemSpacing.y * 2.0f;
+                    avail.y -= btn_h;
+                    float scale = std::min(avail.x / (float)preview_pixels_w, avail.y / (float)preview_pixels_h);
+                    preview_display_size = ImVec2((float)preview_pixels_w * scale, (float)preview_pixels_h * scale);
+                    // Center the image horizontally so portrait images don't leave a gap on the right
+                    float off_x = (avail.x - preview_display_size.x) * 0.5f;
+                    if (off_x > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + off_x);
+                    ImGui::Image(preview_texture->GetResourceId(), preview_display_size);
                 }
 
-                // Buttons
+                ImGui::Separator();
+
+                // Button bar: Prev /  Pin  Delete  Close  / Next
+                ImGui::BeginGroup();
+
+                if (preview_index > 0) {
+                    if (ImGui::Button("< Prev")) {
+                        preview_index--;
+                    }
+                    ImGui::SameLine();
+                }
+
+                ImGui::Text("|");
+                ImGui::SameLine();
+
                 if (ImGui::Button("Pin")) {
-                    // Pin from preview
+                    // Pin from preview — use the preview's display size so the pinned
+                    // screenshot starts at the same visual size (no sudden jump).
+                    if (preview_display_size.x > 0 && preview_display_size.y > 0) {
+                        pinned_size = preview_display_size;
+                    }
+                    pinned_force_size = true;
+
                     if (!pinned_screenshot_path.empty() && pinned_texture) {
                         if (pinned_texture->GetResourceId() != 0)
                             pinned_texture->Unload();
@@ -3353,7 +3430,7 @@ void Steam_Overlay::render_gallery_window()
                     pinned_pixels.clear();
                     pinned_pixels_w = 0;
                     pinned_pixels_h = 0;
-                    pinned_screenshot_path = preview_screenshot_path;
+                    pinned_screenshot_path = screenshot_items[preview_index].full_path;
                     pinned_texture = _renderer ? _renderer->CreateResource() : nullptr;
                     pinned_pos_set = false;
 
@@ -3364,57 +3441,47 @@ void Steam_Overlay::render_gallery_window()
                         pinned_pixels_w = (uint32_t)img_w;
                         pinned_pixels_h = (uint32_t)img_h;
                         pinned_texture->AttachResource(pinned_pixels.data(), pinned_pixels_w, pinned_pixels_h);
-                        pinned_size = ImVec2((float)img_w, (float)img_h);
-                        float max_dim = 500.0f;
-                        if (pinned_size.x > max_dim || pinned_size.y > max_dim) {
-                            float scale = std::min(max_dim / pinned_size.x, max_dim / pinned_size.y);
-                            pinned_size.x *= scale;
-                            pinned_size.y *= scale;
-                        }
                         stbi_image_free(img);
                     }
+
+                    // Close preview and immediately clear the path so it never re-opens
+                    ImGui::CloseCurrentPopup();
+                    clear_preview_state();
                 }
                 ImGui::SameLine();
+
                 if (ImGui::Button("Delete")) {
-                    single_delete_path = preview_screenshot_path;
+                    single_delete_path = screenshot_items[preview_index].full_path;
                     delete_all_selected = false;
                     show_delete_confirmation = true;
                     delete_confirm_open_active = true;
-                    // Close the preview immediately and clear its state so it doesn't
-                    // re-open on the next frame on top of the confirm modal
                     ImGui::CloseCurrentPopup();
-                    preview_open_active = false;
-                    preview_screenshot_path.clear();
-                    if (preview_texture) {
-                        if (preview_texture->GetResourceId() != 0)
-                            preview_texture->Unload();
-                        preview_texture->Delete();
-                        preview_texture = nullptr;
-                    }
-                    preview_pixels.clear();
-                    preview_pixels_w = 0;
-                    preview_pixels_h = 0;
+                    clear_preview_state();
                 }
                 ImGui::SameLine();
+
                 if (ImGui::Button("Close")) {
                     ImGui::CloseCurrentPopup();
                 }
+                ImGui::SameLine();
+
+                ImGui::Text("|");
+                ImGui::SameLine();
+
+                if (preview_index < (int)screenshot_items.size() - 1) {
+                    if (ImGui::Button("Next >")) {
+                        preview_index++;
+                    }
+                }
+
+                ImGui::EndGroup();
+
                 ImGui::EndPopup();
             } else {
                 // Modal returned false: either it was just closed, or never opened
                 if (preview_open_active) {
                     // User closed it - cleanup
-                    preview_screenshot_path.clear();
-                    if (preview_texture) {
-                        if (preview_texture->GetResourceId() != 0)
-                            preview_texture->Unload();
-                        preview_texture->Delete();
-                        preview_texture = nullptr;
-                    }
-                    preview_pixels.clear();
-                    preview_pixels_w = 0;
-                    preview_pixels_h = 0;
-                    preview_open_active = false;
+                    clear_preview_state();
                 }
             }
         }
@@ -3509,14 +3576,18 @@ void Steam_Overlay::render_pinned_screenshot()
 
     ImGui::PushFont(font_default);
 
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize;
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
     if (!show_overlay) {
-        // When overlay is closed: click-through, no move, no resize, no title bar
+        // When overlay is closed: click-through, no move, no resize, no title bar, no scroll
         flags |= ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoMove
                | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar
+               | ImGuiWindowFlags_NoScrollbar
                | ImGuiWindowFlags_NoBringToFrontOnFocus
                | ImGuiWindowFlags_NoFocusOnAppearing
                | ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoNavInputs;
+    } else {
+        // User can resize when overlay is open
+        flags |= ImGuiWindowFlags_NoScrollbar;
     }
 
     if (!pinned_pos_set && show_overlay) {
@@ -3528,28 +3599,70 @@ void Steam_Overlay::render_pinned_screenshot()
     } else {
         ImGui::SetNextWindowPos(pinned_pos, ImGuiCond_FirstUseEver);
     }
-    ImGui::SetNextWindowSize(pinned_size, ImGuiCond_FirstUseEver);
-
-    // Set alpha for click-through mode
-    if (!show_overlay) {
-        ImGui::SetNextWindowBgAlpha(pinned_opacity);
+    // Both open and closed states use ImGuiCond_Always so the window size tracks
+    // pinned_size (and the controls-height / padding offset) every frame. This is
+    // required because the open and closed window-size formulas are different, and
+    // FirstUseEver wouldn't apply the new size on the open↔closed transition.
+    // The user can still freely resize the open window because pinned_size is
+    // captured from GetWindowSize() each frame inside the show_overlay block.
+    if (show_overlay) {
+        // When overlay is open there are controls below the image (Separator + Slider + Button).
+        // Add their estimated height so the window is tall enough to show everything without scrolling.
+        float controls_h = ImGui::GetFrameHeightWithSpacing() * 2   // slider + button
+            + ImGui::GetStyle().ItemSpacing.y * 4;                  // spacing around separator
+        ImGui::SetNextWindowSize(ImVec2(pinned_size.x, pinned_size.y + controls_h), ImGuiCond_Always);
+    } else {
+        // When overlay is closed the window has no title bar — add WindowPadding
+        // so the image fits exactly inside the content area.
+        float pad_x = 2.0f * ImGui::GetStyle().WindowPadding.x;
+        float pad_y = 2.0f * ImGui::GetStyle().WindowPadding.y;
+        ImGui::SetNextWindowSize(ImVec2(pinned_size.x + pad_x, pinned_size.y + pad_y), ImGuiCond_Always);
     }
+    pinned_force_size = false; // consumed
+
+    // Apply opacity to both the background and the image tint
+    ImGui::SetNextWindowBgAlpha(pinned_opacity);
 
     char pin_wnd_id[64];
     snprintf(pin_wnd_id, sizeof(pin_wnd_id), "Pinned Screenshot###pinned_ss");
     if (ImGui::Begin(pin_wnd_id, nullptr, flags)) {
-        ImGui::Image(pinned_texture->GetResourceId(), pinned_size);
+        // Draw with alpha via draw list (old ImGui doesn't have tint_col on Image)
+        {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImVec2 p0 = ImGui::GetCursorScreenPos();
+            ImVec2 p1 = ImVec2(p0.x + pinned_size.x, p0.y + pinned_size.y);
+            dl->AddImage(pinned_texture->GetResourceId(), p0, p1,
+                ImVec2(0, 0), ImVec2(1, 1),
+                IM_COL32(255, 255, 255, (int)(pinned_opacity * 255.0f)));
+            ImGui::Dummy(pinned_size); // advance cursor for subsequent controls
+        }
 
         if (show_overlay) {
             // Editable controls when overlay is open
             ImGui::Separator();
             ImGui::SliderFloat("Opacity", &pinned_opacity, 0.1f, 1.0f, "%.2f");
 
-            // Store position changes
+            // Store position changes.
+            // Strip the controls height from the stored size so pinned_size represents
+            // the pure image display size — we re-add controls_h on the next frame.
             pinned_pos = ImGui::GetWindowPos();
-            pinned_size = ImGui::GetWindowSize();
+            {
+                ImVec2 wnd_sz = ImGui::GetWindowSize();
+                float controls_h = ImGui::GetFrameHeightWithSpacing() * 2
+                    + ImGui::GetStyle().ItemSpacing.y * 4;
+                pinned_size = ImVec2(wnd_sz.x, wnd_sz.y - controls_h);
+            }
 
-            // Prevent resize from going too small
+            // Maintain image aspect ratio when the user resizes the window
+            if (pinned_pixels_w > 0 && pinned_pixels_h > 0) {
+                float aspect = (float)pinned_pixels_w / (float)pinned_pixels_h;
+                if (pinned_size.x / pinned_size.y > aspect) {
+                    pinned_size.x = pinned_size.y * aspect;
+                } else {
+                    pinned_size.y = pinned_size.x / aspect;
+                }
+            }
+
             if (pinned_size.x < 50.0f) pinned_size.x = 50.0f;
             if (pinned_size.y < 30.0f) pinned_size.y = 30.0f;
 

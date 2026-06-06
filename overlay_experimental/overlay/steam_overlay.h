@@ -225,6 +225,7 @@ class Steam_Overlay
     std::vector<uint8_t> preview_pixels{};
     uint32_t preview_pixels_w = 0;
     uint32_t preview_pixels_h = 0;
+    int preview_index = -1;
     // Pinned-window persistent pixel storage (keeps the original full image, used when the
     // user resizes the floating window via mouse drag)
     std::vector<uint8_t> pinned_pixels{};
@@ -243,6 +244,10 @@ class Steam_Overlay
     bool pinned_pos_set = false;
     ImVec2 pinned_pos = { 100, 100 };
     ImVec2 pinned_size = { 320, 180 };
+    bool pinned_force_size = false;     // set true to override size on next frame
+
+    // Maximum dimension (px) for a context-menu-initiated pin. Generous — modern monitors are large.
+    static constexpr float kContextPinMaxDim = 800.0f;
 
     std::vector<CapturedScreenshot> captured_screenshots_queue{};
     std::mutex captured_screenshots_mutex{};
@@ -284,6 +289,8 @@ class Steam_Overlay
     void render_gallery_window();
     void render_pinned_screenshot();
     void process_captured_screenshots();
+    // Clears all preview-popup state (path, index, texture, pixels). Does NOT call CloseCurrentPopup.
+    void clear_preview_state();
 
     static void on_screenshot_captured(const InGameOverlay::ScreenshotCallbackParameter_t* screenshot, void* userParameter);
 
