@@ -227,11 +227,6 @@ class Steam_Overlay
     uint32_t preview_pixels_w = 0;
     uint32_t preview_pixels_h = 0;
     int preview_index = -1;
-    // Pinned-window persistent pixel storage (keeps the original full image, used when the
-    // user resizes the floating window via mouse drag)
-    std::vector<uint8_t> pinned_pixels{};
-    uint32_t pinned_pixels_w = 0;
-    uint32_t pinned_pixels_h = 0;
     bool preview_open_active = false;       // true between OpenPopup and explicit close
     bool delete_confirm_open_active = false;
 
@@ -239,12 +234,22 @@ class Steam_Overlay
     bool delete_all_selected = false;
     std::string single_delete_path;
 
-    std::string pinned_screenshot_path{};
-    InGameOverlay::RendererResource_t* pinned_texture = nullptr;
-    float pinned_opacity = 1.0f;
-    bool pinned_pos_set = false;
-    ImVec2 pinned_pos = { 100, 100 };
-    ImVec2 pinned_size = { 320, 180 };
+    struct PinnedScreenshot {
+        uint64_t id;                              // unique per-pin ID for ImGui window identity
+        std::string path;
+        InGameOverlay::RendererResource_t* texture = nullptr;
+        std::vector<uint8_t> pixels;
+        uint32_t pixels_w = 0, pixels_h = 0;
+        float opacity = 1.0f;
+        bool pos_set = false;
+        ImVec2 pos = { 100, 100 };
+        ImVec2 size = { 320, 180 };
+        bool open = true;                          // tracks window close-button (X) state
+    };
+
+    std::vector<PinnedScreenshot> pinned_screenshots{};
+    uint64_t next_pin_id = 1;
+
     // Maximum dimension (px) for a context-menu-initiated pin. Generous — modern monitors are large.
     static constexpr float kContextPinMaxDim = 800.0f;
 
@@ -290,6 +295,10 @@ class Steam_Overlay
     void process_captured_screenshots();
     // Clears all preview-popup state (path, index, texture, pixels). Does NOT call CloseCurrentPopup.
     void clear_preview_state();
+    // Removes a single pinned screenshot by ID (cleans up GPU resources).
+    void unpin_screenshot(uint64_t id);
+    // Removes all pinned screenshots (cleans up GPU resources).
+    void unpin_all_screenshots();
 
     static void on_screenshot_captured(const InGameOverlay::ScreenshotCallbackParameter_t* screenshot, void* userParameter);
 

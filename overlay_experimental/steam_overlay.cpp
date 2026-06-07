@@ -2597,21 +2597,13 @@ void Steam_Overlay::UnSetupOverlay()
             preview_pixels.clear();
             preview_pixels_w = 0;
             preview_pixels_h = 0;
-            pinned_pixels.clear();
-            pinned_pixels_w = 0;
-            pinned_pixels_h = 0;
             if (preview_texture) {
                 if (preview_texture->GetResourceId() != 0)
                     preview_texture->Unload();
                 preview_texture->Delete();
                 preview_texture = nullptr;
             }
-            if (pinned_texture) {
-                if (pinned_texture->GetResourceId() != 0)
-                    pinned_texture->Unload();
-                pinned_texture->Delete();
-                pinned_texture = nullptr;
-            }
+            unpin_all_screenshots();
 
             // manually calling this dtor looks bad, but it actually prevents a lot of crashes on exit, don't remove it!
             // many DX12 games will crash on exit if the hook wasn't manually removed (ex appid 2933080, 1583230)
@@ -3189,19 +3181,9 @@ void Steam_Overlay::render_gallery_window()
             if (item.selected) { has_selection = true; break; }
         }
 
-        if (!pinned_screenshot_path.empty()) {
-            if (ImGui::SmallButton("Unpin current")) {
-                if (pinned_texture) {
-                    if (pinned_texture->GetResourceId() != 0)
-                        pinned_texture->Unload();
-                    pinned_texture->Delete();
-                    pinned_texture = nullptr;
-                }
-                pinned_pixels.clear();
-                pinned_pixels_w = 0;
-                pinned_pixels_h = 0;
-                pinned_screenshot_path.clear();
-                pinned_pos_set = false;
+        if (!pinned_screenshots.empty()) {
+            if (ImGui::SmallButton("Unpin all")) {
+                unpin_all_screenshots();
             }
             ImGui::SameLine();
         }
@@ -3276,37 +3258,31 @@ void Steam_Overlay::render_gallery_window()
                 // Right-click context menu (attach to the image/placeholder, not the whole cell)
                 if (ImGui::BeginPopupContextItem("##screenshot_ctx")) {
                     if (ImGui::Selectable("Pin")) {
-                        if (!pinned_screenshot_path.empty() && pinned_texture) {
-                            if (pinned_texture->GetResourceId() != 0)
-                                pinned_texture->Unload();
-                            pinned_texture->Delete();
-                        }
-                        pinned_pixels.clear();
-                        pinned_pixels_w = 0;
-                        pinned_pixels_h = 0;
-                        pinned_screenshot_path = item.full_path;
-                        pinned_texture = _renderer ? _renderer->CreateResource() : nullptr;
-                        pinned_pos_set = false;
+                        // Build a new pin entry and push it into the vector
+                        PinnedScreenshot pin;
+                        pin.id = next_pin_id++;
+                        pin.path = item.full_path;
 
-                        // Load full image for pinning. Copy into pinned_pixels so the data
-                        // outlives this scope (AttachResource does NOT take ownership).
                         int img_w = 0, img_h = 0;
                         unsigned char* img = stbi_load(item.full_path.c_str(), &img_w, &img_h, nullptr, 4);
-                        if (img && pinned_texture) {
-                            pinned_pixels.assign(img, img + ((size_t)img_w * (size_t)img_h * 4));
-                            pinned_pixels_w = (uint32_t)img_w;
-                            pinned_pixels_h = (uint32_t)img_h;
-                            pinned_texture->AttachResource(pinned_pixels.data(), pinned_pixels_w, pinned_pixels_h);
-                            pinned_size = ImVec2((float)img_w, (float)img_h);
-                            // Cap max pinned size
-                            if (pinned_size.x > kContextPinMaxDim || pinned_size.y > kContextPinMaxDim) {
-                                float scale = std::min(kContextPinMaxDim / pinned_size.x,
-                                                       kContextPinMaxDim / pinned_size.y);
-                                pinned_size.x *= scale;
-                                pinned_size.y *= scale;
+                        if (img) {
+                            pin.pixels.assign(img, img + ((size_t)img_w * (size_t)img_h * 4));
+                            pin.pixels_w = (uint32_t)img_w;
+                            pin.pixels_h = (uint32_t)img_h;
+                            pin.size = ImVec2((float)img_w, (float)img_h);
+                            if (pin.size.x > kContextPinMaxDim || pin.size.y > kContextPinMaxDim) {
+                                float scale = std::min(kContextPinMaxDim / pin.size.x,
+                                                       kContextPinMaxDim / pin.size.y);
+                                pin.size.x *= scale;
+                                pin.size.y *= scale;
+                            }
+                            if (_renderer) {
+                                pin.texture = _renderer->CreateResource();
+                                pin.texture->AttachResource(pin.pixels.data(), pin.pixels_w, pin.pixels_h);
                             }
                             stbi_image_free(img);
                         }
+                        pinned_screenshots.push_back(std::move(pin));
                     }
                     if (ImGui::Selectable("Delete")) {
                         single_delete_path = item.full_path;
@@ -3445,35 +3421,41 @@ void Steam_Overlay::render_gallery_window()
                 ImGui::SameLine();
 
                 if (ImGui::Button("Pin")) {
-                    if (!pinned_screenshot_path.empty() && pinned_texture) {
-                        if (pinned_texture->GetResourceId() != 0)
-                            pinned_texture->Unload();
-                        pinned_texture->Delete();
-                    }
-                    pinned_pixels.clear();
-                    pinned_pixels_w = 0;
-                    pinned_pixels_h = 0;
-                    pinned_screenshot_path = screenshot_items[preview_index].full_path;
-                    pinned_texture = _renderer ? _renderer->CreateResource() : nullptr;
-                    pinned_pos_set = false;
+                    PinnedScreenshot pin;
+                    pin.id = next_pin_id++;
+                    pin.path = screenshot_items[preview_index].full_path;
 
-                    // Use kContextPinMaxDim sizing (same as context menu pin)
-                    int img_w = 0, img_h = 0;
-                    unsigned char* img = stbi_load(pinned_screenshot_path.c_str(), &img_w, &img_h, nullptr, 4);
-                    if (img && pinned_texture) {
-                        pinned_pixels.assign(img, img + ((size_t)img_w * (size_t)img_h * 4));
-                        pinned_pixels_w = (uint32_t)img_w;
-                        pinned_pixels_h = (uint32_t)img_h;
-                        pinned_texture->AttachResource(pinned_pixels.data(), pinned_pixels_w, pinned_pixels_h);
-                        pinned_size = ImVec2((float)img_w, (float)img_h);
-                        if (pinned_size.x > kContextPinMaxDim || pinned_size.y > kContextPinMaxDim) {
-                            float scale = std::min(kContextPinMaxDim / pinned_size.x,
-                                                   kContextPinMaxDim / pinned_size.y);
-                            pinned_size.x *= scale;
-                            pinned_size.y *= scale;
+                    // Repurpose the already-loaded preview pixels to avoid a second stbi_load
+                    if (preview_pixels_w > 0 && preview_pixels_h > 0) {
+                        pin.pixels = preview_pixels; // copies — small enough for a single frame
+                        pin.pixels_w = preview_pixels_w;
+                        pin.pixels_h = preview_pixels_h;
+                    } else {
+                        int img_w = 0, img_h = 0;
+                        unsigned char* img = stbi_load(pin.path.c_str(), &img_w, &img_h, nullptr, 4);
+                        if (img) {
+                            pin.pixels.assign(img, img + ((size_t)img_w * (size_t)img_h * 4));
+                            pin.pixels_w = (uint32_t)img_w;
+                            pin.pixels_h = (uint32_t)img_h;
+                            stbi_image_free(img);
                         }
-                        stbi_image_free(img);
                     }
+
+                    // Same initial sizing as context-menu pin (kContextPinMaxDim)
+                    pin.size = ImVec2((float)pin.pixels_w, (float)pin.pixels_h);
+                    if (pin.size.x > kContextPinMaxDim || pin.size.y > kContextPinMaxDim) {
+                        float scale = std::min(kContextPinMaxDim / pin.size.x,
+                                               kContextPinMaxDim / pin.size.y);
+                        pin.size.x *= scale;
+                        pin.size.y *= scale;
+                    }
+
+                    if (_renderer) {
+                        pin.texture = _renderer->CreateResource();
+                        if (pin.texture && !pin.pixels.empty())
+                            pin.texture->AttachResource(pin.pixels.data(), pin.pixels_w, pin.pixels_h);
+                    }
+                    pinned_screenshots.push_back(std::move(pin));
 
                     // Close preview and immediately clear the path so it never re-opens
                     ImGui::CloseCurrentPopup();
@@ -3543,24 +3525,21 @@ void Steam_Overlay::render_gallery_window()
                             local_storage->file_delete(Local_Storage::screenshots_folder, json_name);
                         }
                         refresh_screenshots_list();
-                        // Clean up pin if the pinned file was among those deleted
-                        if (!pinned_screenshot_path.empty()) {
-                            bool found = false;
+                        // Remove pins for files that no longer exist
+                        for (auto it = pinned_screenshots.begin(); it != pinned_screenshots.end(); ) {
+                            bool exists = false;
                             for (auto& si : screenshot_items) {
-                                if (si.full_path == pinned_screenshot_path) { found = true; break; }
+                                if (si.full_path == it->path) { exists = true; break; }
                             }
-                            if (!found) {
-                                if (pinned_texture) {
-                                    if (pinned_texture->GetResourceId() != 0)
-                                        pinned_texture->Unload();
-                                    pinned_texture->Delete();
-                                    pinned_texture = nullptr;
+                            if (!exists) {
+                                if (it->texture) {
+                                    if (it->texture->GetResourceId() != 0)
+                                        it->texture->Unload();
+                                    it->texture->Delete();
                                 }
-                                pinned_pixels.clear();
-                                pinned_pixels_w = 0;
-                                pinned_pixels_h = 0;
-                                pinned_screenshot_path.clear();
-                                pinned_pos_set = false;
+                                it = pinned_screenshots.erase(it);
+                            } else {
+                                ++it;
                             }
                         }
                     } else if (!single_delete_path.empty()) {
@@ -3579,21 +3558,20 @@ void Steam_Overlay::render_gallery_window()
                             std::string json_name = filename.substr(0, filename.size() - 4) + ".json";
                             local_storage->file_delete(Local_Storage::screenshots_folder, json_name);
                         }
-                        // If this was the pinned image, clear pin
-                        if (single_delete_path == pinned_screenshot_path) {
-                            if (pinned_texture) {
-                                if (pinned_texture->GetResourceId() != 0)
-                                    pinned_texture->Unload();
-                                pinned_texture->Delete();
-                                pinned_texture = nullptr;
-                            }
-                            pinned_pixels.clear();
-                            pinned_pixels_w = 0;
-                            pinned_pixels_h = 0;
-                            pinned_screenshot_path.clear();
-                            pinned_pos_set = false;
-                        }
                         refresh_screenshots_list();
+                        // Remove pin if the deleted file was pinned
+                        for (auto it = pinned_screenshots.begin(); it != pinned_screenshots.end(); ) {
+                            if (it->path == single_delete_path) {
+                                if (it->texture) {
+                                    if (it->texture->GetResourceId() != 0)
+                                        it->texture->Unload();
+                                    it->texture->Delete();
+                                }
+                                it = pinned_screenshots.erase(it);
+                            } else {
+                                ++it;
+                            }
+                        }
                     }
                     single_delete_path.clear();
                     ImGui::CloseCurrentPopup();
@@ -3620,16 +3598,43 @@ void Steam_Overlay::render_gallery_window()
     ImGui::PopFont();
 }
 
-// -- Floating pinned screenshot --
+// -- Pin helpers --
+void Steam_Overlay::unpin_screenshot(uint64_t id)
+{
+    for (auto it = pinned_screenshots.begin(); it != pinned_screenshots.end(); ++it) {
+        if (it->id == id) {
+            if (it->texture) {
+                if (it->texture->GetResourceId() != 0)
+                    it->texture->Unload();
+                it->texture->Delete();
+            }
+            pinned_screenshots.erase(it);
+            return;
+        }
+    }
+}
+
+void Steam_Overlay::unpin_all_screenshots()
+{
+    for (auto& pin : pinned_screenshots) {
+        if (pin.texture) {
+            if (pin.texture->GetResourceId() != 0)
+                pin.texture->Unload();
+            pin.texture->Delete();
+        }
+    }
+    pinned_screenshots.clear();
+}
+
+// -- Floating pinned screenshots --
 void Steam_Overlay::render_pinned_screenshot()
 {
-    if (pinned_screenshot_path.empty() || !pinned_texture || pinned_texture->GetResourceId() == 0)
+    if (pinned_screenshots.empty())
         return;
 
     ImGui::PushFont(font_default);
 
-    // Track overlay state transitions — only force size on open↔closed transitions
-    // so that user resize is never overwritten.
+    // Track overlay state transitions once — applies to all pin windows.
     static bool prev_overlay_state = false;
     bool overlay_opened = show_overlay && !prev_overlay_state;
     bool overlay_closed = !show_overlay && prev_overlay_state;
@@ -3650,79 +3655,83 @@ void Steam_Overlay::render_pinned_screenshot()
         flags |= ImGuiWindowFlags_NoScrollbar;
     }
 
-    if (!pinned_pos_set && show_overlay) {
-        ImGui::SetNextWindowPos(pinned_pos, ImGuiCond_FirstUseEver);
-        pinned_pos_set = true;
-    } else if (!pinned_pos_set) {
-        ImGui::SetNextWindowPos(pinned_pos, ImGuiCond_Always);
-    } else {
-        ImGui::SetNextWindowPos(pinned_pos, ImGuiCond_FirstUseEver);
-    }
+    // Phase 1: render each pin in its own window
+    for (auto& pin : pinned_screenshots) {
+        if (!pin.texture || pin.texture->GetResourceId() == 0)
+            continue;
 
-    // Only force window size on open↔closed transitions
-    if (overlay_opened) {
-        ImGui::SetNextWindowSize(ImVec2(pinned_size.x, pinned_size.y + controls_h), ImGuiCond_Always);
-    } else if (overlay_closed) {
-        float pad_x = 2.0f * ImGui::GetStyle().WindowPadding.x;
-        float pad_y = 2.0f * ImGui::GetStyle().WindowPadding.y;
-        ImGui::SetNextWindowSize(ImVec2(pinned_size.x + pad_x, pinned_size.y + pad_y), ImGuiCond_Always);
-    }
+        char wnd_id[64];
+        snprintf(wnd_id, sizeof(wnd_id), "Pinned Screenshot###pinned_ss_%llu",
+                 (unsigned long long)pin.id);
 
-    ImGui::SetNextWindowSizeConstraints(ImVec2(100, 60), ImVec2(8192, 8192));
-    ImGui::SetNextWindowBgAlpha(pinned_opacity);
+        // Position (deferred until first manual move)
+        ImGui::SetNextWindowPos(pin.pos, pin.pos_set
+            ? ImGuiCond_FirstUseEver : ImGuiCond_Always);
+        pin.pos_set = true;
 
-    bool pin_open = true;
-    char pin_wnd_id[64];
-    snprintf(pin_wnd_id, sizeof(pin_wnd_id), "Pinned Screenshot###pinned_ss");
-    if (ImGui::Begin(pin_wnd_id, &pin_open, flags)) {
-        // Draw image at correct aspect ratio within available content area
-        ImVec2 avail = ImGui::GetContentRegionAvail();
-        if (show_overlay)
-            avail.y -= controls_h;
-
-        if (pinned_pixels_w > 0 && pinned_pixels_h > 0 && avail.x > 0 && avail.y > 0) {
-            float scale = std::min(avail.x / (float)pinned_pixels_w,
-                                   avail.y / (float)pinned_pixels_h);
-            float disp_w = (float)pinned_pixels_w * scale;
-            float disp_h = (float)pinned_pixels_h * scale;
-
-            float off_x = (avail.x - disp_w) * 0.5f;
-            if (off_x > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + off_x);
-
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            ImVec2 p0 = ImGui::GetCursorScreenPos();
-            dl->AddImage(pinned_texture->GetResourceId(), p0,
-                ImVec2(p0.x + disp_w, p0.y + disp_h),
-                ImVec2(0, 0), ImVec2(1, 1),
-                IM_COL32(255, 255, 255, (int)(pinned_opacity * 255.0f)));
-            ImGui::Dummy(ImVec2(disp_w, disp_h));
+        // Only force size on open↔closed transitions
+        if (overlay_opened) {
+            ImGui::SetNextWindowSize(
+                ImVec2(pin.size.x, pin.size.y + controls_h), ImGuiCond_Always);
+        } else if (overlay_closed) {
+            float pad_x = 2.0f * ImGui::GetStyle().WindowPadding.x;
+            float pad_y = 2.0f * ImGui::GetStyle().WindowPadding.y;
+            ImGui::SetNextWindowSize(
+                ImVec2(pin.size.x + pad_x, pin.size.y + pad_y), ImGuiCond_Always);
         }
 
-        if (show_overlay) {
-            ImGui::Separator();
-            ImGui::SliderFloat("Opacity", &pinned_opacity, 0.1f, 1.0f, "%.2f");
+        ImGui::SetNextWindowSizeConstraints(ImVec2(100, 60), ImVec2(8192, 8192));
+        ImGui::SetNextWindowBgAlpha(pin.opacity);
 
-            pinned_pos = ImGui::GetWindowPos();
-            pinned_size = avail;
-            if (pinned_size.x < 50.0f) pinned_size.x = 50.0f;
-            if (pinned_size.y < 30.0f) pinned_size.y = 30.0f;
+        if (ImGui::Begin(wnd_id, &pin.open, flags)) {
+            ImVec2 avail = ImGui::GetContentRegionAvail();
+            if (show_overlay)
+                avail.y -= controls_h;
+
+            // Draw image at correct aspect ratio within available space
+            if (pin.pixels_w > 0 && pin.pixels_h > 0 && avail.x > 0 && avail.y > 0) {
+                float scale = std::min(avail.x / (float)pin.pixels_w,
+                                       avail.y / (float)pin.pixels_h);
+                float disp_w = (float)pin.pixels_w * scale;
+                float disp_h = (float)pin.pixels_h * scale;
+
+                float off_x = (avail.x - disp_w) * 0.5f;
+                if (off_x > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + off_x);
+
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                ImVec2 p0 = ImGui::GetCursorScreenPos();
+                dl->AddImage(pin.texture->GetResourceId(), p0,
+                    ImVec2(p0.x + disp_w, p0.y + disp_h),
+                    ImVec2(0, 0), ImVec2(1, 1),
+                    IM_COL32(255, 255, 255, (int)(pin.opacity * 255.0f)));
+                ImGui::Dummy(ImVec2(disp_w, disp_h));
+            }
+
+            if (show_overlay) {
+                ImGui::Separator();
+                ImGui::SliderFloat("Opacity", &pin.opacity, 0.1f, 1.0f, "%.2f");
+
+                pin.pos = ImGui::GetWindowPos();
+                pin.size = avail;
+                if (pin.size.x < 50.0f) pin.size.x = 50.0f;
+                if (pin.size.y < 30.0f) pin.size.y = 30.0f;
+            }
         }
+        ImGui::End();
     }
-    ImGui::End();
 
-    // X button in title bar was clicked → clean up
-    if (!pin_open) {
-        if (pinned_texture) {
-            if (pinned_texture->GetResourceId() != 0)
-                pinned_texture->Unload();
-            pinned_texture->Delete();
-            pinned_texture = nullptr;
+    // Phase 2: remove any pins whose X button was clicked
+    for (auto it = pinned_screenshots.begin(); it != pinned_screenshots.end(); ) {
+        if (!it->open) {
+            if (it->texture) {
+                if (it->texture->GetResourceId() != 0)
+                    it->texture->Unload();
+                it->texture->Delete();
+            }
+            it = pinned_screenshots.erase(it);
+        } else {
+            ++it;
         }
-        pinned_pixels.clear();
-        pinned_pixels_w = 0;
-        pinned_pixels_h = 0;
-        pinned_screenshot_path.clear();
-        pinned_pos_set = false;
     }
 
     ImGui::PopFont();
