@@ -228,6 +228,7 @@ class Steam_Overlay
     uint32_t preview_pixels_h = 0;
     int preview_index = -1;
     bool preview_open_active = false;       // true between OpenPopup and explicit close
+    bool preview_delete_pending = false;    // true while inline delete confirmation is shown in preview
     bool delete_confirm_open_active = false;
 
     bool show_delete_confirmation = false;
@@ -244,6 +245,8 @@ class Steam_Overlay
         bool pos_set = false;
         ImVec2 pos = { 100, 100 };
         ImVec2 size = { 320, 180 };
+        ImVec2 image_disp = { 0, 0 };             // actual image display size (capped by aspect ratio)
+        bool focus_requested = false;              // true to bring window to front on next frame
         bool open = true;                          // tracks window close-button (X) state
     };
 
