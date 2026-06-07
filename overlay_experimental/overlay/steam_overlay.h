@@ -208,6 +208,7 @@ class Steam_Overlay
         std::vector<uint8_t> thumbnail_pixels{};
         bool selected = false;
         bool failed_to_load = false;
+        time_t mtime = 0;  // file modification time, 0 = unknown
     };
 
     struct CapturedScreenshot {
@@ -244,8 +245,6 @@ class Steam_Overlay
     bool pinned_pos_set = false;
     ImVec2 pinned_pos = { 100, 100 };
     ImVec2 pinned_size = { 320, 180 };
-    bool pinned_force_size = false;     // set true to override size on next frame
-
     // Maximum dimension (px) for a context-menu-initiated pin. Generous — modern monitors are large.
     static constexpr float kContextPinMaxDim = 800.0f;
 
