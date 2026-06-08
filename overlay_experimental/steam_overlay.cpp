@@ -4230,6 +4230,15 @@ void Steam_Overlay::render_pinned_screenshot()
                 float disp_w = src_w * scale;
                 float disp_h = src_h * scale;
 
+                // Snap the constrained axis to the exact avail dimension to
+                // prevent float-arithmetic drift: src_w * (avail.x / src_w)
+                // may not equal avail.x exactly in IEEE 754, causing a tiny
+                // sub-pixel error every frame that compounds.
+                if (avail.x * src_h <= image_avail_y * src_w)
+                    disp_w = avail.x;   // width-constrained
+                else
+                    disp_h = image_avail_y;  // height-constrained
+
                 float off_x = (avail.x - disp_w) * 0.5f;
                 if (off_x > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + off_x);
 
@@ -4275,10 +4284,6 @@ void Steam_Overlay::render_pinned_screenshot()
                 ImGui::SameLine();
                 if (ImGui::Button("Crop")) {
                     pin.crop_rect_prev = pin.crop_rect;
-                    // If no active crop, start with the full image as the selection area
-                    if (pin.crop_rect.z <= pin.crop_rect.x || pin.crop_rect.w <= pin.crop_rect.y) {
-                        pin.crop_rect = ImVec4(0, 0, (float)pin.pixels_w, (float)pin.pixels_h);
-                    }
                     pin.crop_mode = true;
                 }
             }
