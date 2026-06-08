@@ -229,11 +229,26 @@ class Steam_Overlay
     int preview_index = -1;
     bool preview_open_active = false;       // true between OpenPopup and explicit close
     bool preview_delete_pending = false;    // true while inline delete confirmation is shown in preview
+    bool preview_crop_mode = false;         // true while the crop editor is open inside the preview
+    ImVec4 preview_crop_rect = { 0, 0, 0, 0 };        // current selection in source pixels (0,0,0,0 = full image)
+    ImVec4 preview_crop_rect_prev = { 0, 0, 0, 0 };   // saved on entering crop mode (for Cancel)
     bool delete_confirm_open_active = false;
 
     bool show_delete_confirmation = false;
     bool delete_all_selected = false;
     std::string single_delete_path;
+
+    // Drag state for the crop-rectangle editor. Used by both the pin and the
+    // preview crop flows. `handle` follows the same convention as in the
+    // editor implementation: 0..3 = corners (TL, TR, BR, BL), 4..7 = edge
+    // midpoints (T, R, B, L), 8 = body move, -1 = none.
+    struct CropDragState {
+        bool dragging = false;
+        ImVec2 start = { 0, 0 };
+        int handle = -1;
+        ImVec2 anchor = { 0, 0 };        // opposite corner / body offset
+        int handle_hover = -1;            // -1 = none
+    };
 
     struct PinnedScreenshot {
         uint64_t id;                              // unique per-pin ID for ImGui window identity
@@ -248,6 +263,10 @@ class Steam_Overlay
         ImVec2 image_disp = { 0, 0 };             // actual image display size (capped by aspect ratio)
         bool focus_requested = false;              // true to bring window to front on next frame
         bool open = true;                          // tracks window close-button (X) state
+        ImVec4 crop_rect = { 0, 0, 0, 0 };         // crop region (x0,y0,x1,y1) in source pixels; (0,0,0,0) = full image
+        ImVec4 crop_rect_prev = { 0, 0, 0, 0 };    // saved crop_rect when entering crop mode (for Cancel)
+        bool crop_mode = false;                    // true while the crop editor is open for this pin
+        CropDragState crop_drag{};                 // per-pin drag state for the crop editor
     };
 
     std::vector<PinnedScreenshot> pinned_screenshots{};
@@ -302,6 +321,24 @@ class Steam_Overlay
     void unpin_screenshot(uint64_t id);
     // Removes all pinned screenshots (cleans up GPU resources).
     void unpin_all_screenshots();
+
+    // Drag state for the crop-rectangle editor. The pin version lives inside
+    // PinnedScreenshot (per-pin); the preview version is shared since only
+    // one preview exists at a time.
+    CropDragState preview_crop_drag{};
+
+    // Renders the crop-rectangle editor over a displayed image. `rect` is
+    // (x0, y0, x1, y1) in source pixels and is mutated in place. `tex_id` is
+    // the texture resource; it's used to redraw the image inside the
+    // selection area so the dim overlay outside doesn't cover it. Returns
+    // Active while the user keeps editing, Confirm when the Confirm button
+    // is clicked (caller applies the crop), Cancel when Cancel is clicked
+    // (caller discards).
+    enum class CropAction { Active, Confirm, Cancel };
+    CropAction render_crop_editor(ImVec4& rect, CropDragState& st,
+                                  ImTextureID tex_id,
+                                  uint32_t src_w, uint32_t src_h,
+                                  ImVec2 img_min, ImVec2 img_size);
 
     static void on_screenshot_captured(const InGameOverlay::ScreenshotCallbackParameter_t* screenshot, void* userParameter);
 

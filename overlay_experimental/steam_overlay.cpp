@@ -3158,6 +3158,10 @@ void Steam_Overlay::clear_preview_state()
     preview_screenshot_path.clear();
     preview_open_active = false;
     preview_delete_pending = false;
+    preview_crop_mode = false;
+    preview_crop_rect = ImVec4(0, 0, 0, 0);
+    preview_crop_rect_prev = ImVec4(0, 0, 0, 0);
+    preview_crop_drag = CropDragState{};
     preview_index = -1;
     if (preview_texture) {
         if (preview_texture->GetResourceId() != 0)
@@ -3298,6 +3302,7 @@ void Steam_Overlay::render_gallery_window()
                             }
                             stbi_image_free(img);
                         }
+                        pin.crop_rect = ImVec4(0, 0, (float)pin.pixels_w, (float)pin.pixels_h);
                         pin.focus_requested = true;
                         pinned_screenshots.push_back(std::move(pin));
                     }
@@ -3365,6 +3370,9 @@ void Steam_Overlay::render_gallery_window()
             ImVec2 disp_center = ImGui::GetIO().DisplaySize;
             ImGui::SetNextWindowPos(ImVec2(disp_center.x * 0.5f, disp_center.y * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
             ImGuiWindowFlags preview_flags = ImGuiWindowFlags_NoScrollbar;
+            if (preview_crop_mode) {
+                preview_flags |= ImGuiWindowFlags_NoMove;
+            }
             bool preview_modal_open = true;
             if (ImGui::BeginPopupModal("Screenshot Preview", &preview_modal_open, preview_flags)) {
                 // Navigate to a different screenshot
@@ -3373,6 +3381,11 @@ void Steam_Overlay::render_gallery_window()
                     screenshot_items[preview_index].full_path != preview_screenshot_path)
                 {
                     preview_screenshot_path = screenshot_items[preview_index].full_path;
+                    // Reset crop state — old selection no longer applies to new image
+                    preview_crop_mode = false;
+                    preview_crop_rect = ImVec4(0, 0, 0, 0);
+                    preview_crop_rect_prev = ImVec4(0, 0, 0, 0);
+                    preview_crop_drag = CropDragState{};
                     if (preview_texture) {
                         if (preview_texture->GetResourceId() != 0)
                             preview_texture->Unload();
@@ -3406,110 +3419,176 @@ void Steam_Overlay::render_gallery_window()
                 bool preview_texture_ok = preview_texture && preview_texture->GetResourceId() != 0 && preview_pixels_w > 0 && preview_pixels_h > 0;
                 if (preview_texture_ok) {
                     ImVec2 avail = ImGui::GetContentRegionAvail();
-                    // Reserve space for the date + button bar at the bottom
-                    float btn_h = ImGui::GetTextLineHeightWithSpacing() * 3.0f + ImGui::GetStyle().ItemSpacing.y * 4.0f;
-                    avail.y -= btn_h;
+                    // Reserve space for the date + button bar at the bottom (only when not in crop mode)
+                    if (!preview_crop_mode) {
+                        float btn_h = ImGui::GetTextLineHeightWithSpacing() * 3.0f + ImGui::GetStyle().ItemSpacing.y * 4.0f;
+                        avail.y -= btn_h;
+                    }
                     float scale = std::min(avail.x / (float)preview_pixels_w, avail.y / (float)preview_pixels_h);
                     ImVec2 preview_display_size = ImVec2((float)preview_pixels_w * scale, (float)preview_pixels_h * scale);
                     // Center the image horizontally so portrait images don't leave a gap on the right
                     float off_x = (avail.x - preview_display_size.x) * 0.5f;
                     if (off_x > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + off_x);
+                    ImVec2 preview_img_pos = ImGui::GetCursorScreenPos();
                     ImGui::Image(preview_texture->GetResourceId(), preview_display_size);
 
-                    ImGui::Separator();
-
-                    // Screenshot date — only shown when texture is loaded (avoids flash on navigation)
-                    if (!screenshot_items.empty() && preview_index >= 0 && preview_index < (int)screenshot_items.size()) {
-                        auto& src_item = screenshot_items[preview_index];
-                        if (src_item.mtime > 0) {
-                            char time_buf[64];
-                            struct tm local_tm{};
-#ifdef _MSC_VER
-                            localtime_s(&local_tm, &src_item.mtime);
-#else
-                            localtime_r(&src_item.mtime, &local_tm);
-#endif
-                            std::strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &local_tm);
-                            ImGui::TextUnformatted(time_buf);
-                        } else {
-                            ImGui::TextUnformatted(src_item.filename.c_str());
+                    // If in crop mode, draw the crop editor over the image. The
+                    // Confirm action creates a new pin with preview_crop_rect.
+                    // Cancel exits crop mode and restores the previous rect.
+                    if (preview_crop_mode) {
+                        if (preview_crop_rect.z <= preview_crop_rect.x
+                            || preview_crop_rect.w <= preview_crop_rect.y) {
+                            preview_crop_rect = ImVec4(0, 0,
+                                (float)preview_pixels_w, (float)preview_pixels_h);
                         }
-                    }
+                        CropAction act = render_crop_editor(preview_crop_rect,
+                            preview_crop_drag,
+                            preview_texture->GetResourceId(),
+                            preview_pixels_w, preview_pixels_h,
+                            preview_img_pos, preview_display_size);
+                        if (act == CropAction::Confirm) {
+                            // Create a new pin with the selected crop region
+                            PinnedScreenshot pin;
+                            pin.id = next_pin_id++;
+                            pin.path = screenshot_items[preview_index].full_path;
+                            if (preview_pixels_w > 0 && preview_pixels_h > 0) {
+                                pin.pixels = preview_pixels;
+                                pin.pixels_w = preview_pixels_w;
+                                pin.pixels_h = preview_pixels_h;
+                            }
+                            // Initial size = the crop region (not the full image)
+                            float crop_w = std::max(1.0f, preview_crop_rect.z - preview_crop_rect.x);
+                            float crop_h = std::max(1.0f, preview_crop_rect.w - preview_crop_rect.y);
+                            pin.size = ImVec2(crop_w, crop_h);
+                            if (pin.size.x > kContextPinMaxDim || pin.size.y > kContextPinMaxDim) {
+                                float ss = std::min(kContextPinMaxDim / pin.size.x,
+                                                    kContextPinMaxDim / pin.size.y);
+                                pin.size.x *= ss;
+                                pin.size.y *= ss;
+                            }
+                            if (_renderer) {
+                                pin.texture = _renderer->CreateResource();
+                                if (pin.texture && !pin.pixels.empty())
+                                    pin.texture->AttachResource(pin.pixels.data(),
+                                        pin.pixels_w, pin.pixels_h);
+                            }
+                            pin.crop_rect = preview_crop_rect;
+                            pin.focus_requested = true;
+                            pinned_screenshots.push_back(std::move(pin));
 
-                    // Button bar: < Prev | Pin  Delete | Next >
-                    ImGui::BeginGroup();
+                            // Exit crop mode and close the preview
+                            preview_crop_mode = false;
+                            ImGui::CloseCurrentPopup();
+                            clear_preview_state();
+                        } else if (act == CropAction::Cancel) {
+                            preview_crop_rect = preview_crop_rect_prev;
+                            preview_crop_mode = false;
+                        }
+                    } else {
+                        ImGui::Separator();
 
-                    // Prev — always visible, wraps to last
-                    if (ImGui::Button("< Prev")) {
-                        if (preview_index <= 0)
-                            preview_index = (int)screenshot_items.size() - 1;
-                        else
-                            preview_index--;
-                    }
-                    ImGui::SameLine();
-
-                    ImGui::Text("|");
-                    ImGui::SameLine();
-
-                    if (ImGui::Button("Pin")) {
-                        PinnedScreenshot pin;
-                        pin.id = next_pin_id++;
-                        pin.path = screenshot_items[preview_index].full_path;
-
-                        // Repurpose the already-loaded preview pixels to avoid a second stbi_load
-                        if (preview_pixels_w > 0 && preview_pixels_h > 0) {
-                            pin.pixels = preview_pixels; // copies — small enough for a single frame
-                            pin.pixels_w = preview_pixels_w;
-                            pin.pixels_h = preview_pixels_h;
-                        } else {
-                            int img_w = 0, img_h = 0;
-                            unsigned char* img = stbi_load(pin.path.c_str(), &img_w, &img_h, nullptr, 4);
-                            if (img) {
-                                pin.pixels.assign(img, img + ((size_t)img_w * (size_t)img_h * 4));
-                                pin.pixels_w = (uint32_t)img_w;
-                                pin.pixels_h = (uint32_t)img_h;
-                                stbi_image_free(img);
+                        // Screenshot date — only shown when texture is loaded (avoids flash on navigation)
+                        if (!screenshot_items.empty() && preview_index >= 0 && preview_index < (int)screenshot_items.size()) {
+                            auto& src_item = screenshot_items[preview_index];
+                            if (src_item.mtime > 0) {
+                                char time_buf[64];
+                                struct tm local_tm{};
+#ifdef _MSC_VER
+                                localtime_s(&local_tm, &src_item.mtime);
+#else
+                                localtime_r(&src_item.mtime, &local_tm);
+#endif
+                                std::strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &local_tm);
+                                ImGui::TextUnformatted(time_buf);
+                            } else {
+                                ImGui::TextUnformatted(src_item.filename.c_str());
                             }
                         }
 
-                        // Same initial sizing as context-menu pin (kContextPinMaxDim)
-                        pin.size = ImVec2((float)pin.pixels_w, (float)pin.pixels_h);
-                        if (pin.size.x > kContextPinMaxDim || pin.size.y > kContextPinMaxDim) {
-                            float scale = std::min(kContextPinMaxDim / pin.size.x,
-                                                   kContextPinMaxDim / pin.size.y);
-                            pin.size.x *= scale;
-                            pin.size.y *= scale;
+                        // Button bar: < Prev | Pin  Crop  Delete | Next >
+                        ImGui::BeginGroup();
+
+                        // Prev — always visible, wraps to last
+                        if (ImGui::Button("< Prev")) {
+                            if (preview_index <= 0)
+                                preview_index = (int)screenshot_items.size() - 1;
+                            else
+                                preview_index--;
+                        }
+                        ImGui::SameLine();
+
+                        ImGui::Text("|");
+                        ImGui::SameLine();
+
+                        if (ImGui::Button("Pin")) {
+                            PinnedScreenshot pin;
+                            pin.id = next_pin_id++;
+                            pin.path = screenshot_items[preview_index].full_path;
+
+                            // Repurpose the already-loaded preview pixels to avoid a second stbi_load
+                            if (preview_pixels_w > 0 && preview_pixels_h > 0) {
+                                pin.pixels = preview_pixels; // copies — small enough for a single frame
+                                pin.pixels_w = preview_pixels_w;
+                                pin.pixels_h = preview_pixels_h;
+                            } else {
+                                int img_w = 0, img_h = 0;
+                                unsigned char* img = stbi_load(pin.path.c_str(), &img_w, &img_h, nullptr, 4);
+                                if (img) {
+                                    pin.pixels.assign(img, img + ((size_t)img_w * (size_t)img_h * 4));
+                                    pin.pixels_w = (uint32_t)img_w;
+                                    pin.pixels_h = (uint32_t)img_h;
+                                    stbi_image_free(img);
+                                }
+                            }
+
+                            // Same initial sizing as context-menu pin (kContextPinMaxDim)
+                            pin.size = ImVec2((float)pin.pixels_w, (float)pin.pixels_h);
+                            if (pin.size.x > kContextPinMaxDim || pin.size.y > kContextPinMaxDim) {
+                                float scale = std::min(kContextPinMaxDim / pin.size.x,
+                                                       kContextPinMaxDim / pin.size.y);
+                                pin.size.x *= scale;
+                                pin.size.y *= scale;
+                            }
+
+                            if (_renderer) {
+                                pin.texture = _renderer->CreateResource();
+                                if (pin.texture && !pin.pixels.empty())
+                                    pin.texture->AttachResource(pin.pixels.data(), pin.pixels_w, pin.pixels_h);
+                            }
+                            pin.crop_rect = ImVec4(0, 0, (float)pin.pixels_w, (float)pin.pixels_h);
+                            pin.focus_requested = true;
+                            pinned_screenshots.push_back(std::move(pin));
+
+                            // Leave preview open — pin is immediately visible in its own window
+                        }
+                        ImGui::SameLine();
+
+                        if (ImGui::Button("Crop")) {
+                            preview_crop_rect_prev = ImVec4(0, 0,
+                                (float)preview_pixels_w, (float)preview_pixels_h);
+                            preview_crop_rect = preview_crop_rect_prev;
+                            preview_crop_mode = true;
+                        }
+                        ImGui::SameLine();
+
+                        if (!preview_delete_pending && ImGui::Button("Delete")) {
+                            preview_delete_pending = true;
+                        }
+                        ImGui::SameLine();
+
+                        ImGui::Text("|");
+                        ImGui::SameLine();
+
+                        // Next — always visible, wraps to first
+                        if (ImGui::Button("Next >")) {
+                            if (preview_index >= (int)screenshot_items.size() - 1)
+                                preview_index = 0;
+                            else
+                                preview_index++;
                         }
 
-                        if (_renderer) {
-                            pin.texture = _renderer->CreateResource();
-                            if (pin.texture && !pin.pixels.empty())
-                                pin.texture->AttachResource(pin.pixels.data(), pin.pixels_w, pin.pixels_h);
-                        }
-                        pin.focus_requested = true;
-                        pinned_screenshots.push_back(std::move(pin));
-
-                        // Leave preview open — pin is immediately visible in its own window
+                        ImGui::EndGroup();
                     }
-                    ImGui::SameLine();
-
-                    if (!preview_delete_pending && ImGui::Button("Delete")) {
-                        preview_delete_pending = true;
-                    }
-                    ImGui::SameLine();
-
-                    ImGui::Text("|");
-                    ImGui::SameLine();
-
-                    // Next — always visible, wraps to first
-                    if (ImGui::Button("Next >")) {
-                        if (preview_index >= (int)screenshot_items.size() - 1)
-                            preview_index = 0;
-                        else
-                            preview_index++;
-                    }
-
-                    ImGui::EndGroup();
 
                     // Inline delete confirmation (avoids stacking modals which closes the preview)
                     if (preview_delete_pending) {
@@ -3714,6 +3793,300 @@ void Steam_Overlay::unpin_all_screenshots()
 }
 
 // -- Floating pinned screenshots --
+
+// Render the crop-rectangle editor overlay. The caller renders the FULL
+// image with UV (0,0)-(1,1) at img_min/img_size before calling this. This
+// function draws:
+//   1) a dim layer over the whole image,
+//   2) the image AGAIN, clipped to the selection rect, so the selection
+//      region looks "un-dimmed" while everything else is darkened,
+//   3) a bright border and 8 drag handles,
+//   4) a small toolbar with Confirm and Cancel buttons.
+// `tex_id` is the texture's GPU resource ID used for step 2.
+// `rect` is in source-pixel coordinates and is mutated in place. Returns
+// Active until the user clicks Confirm or Cancel.
+Steam_Overlay::CropAction Steam_Overlay::render_crop_editor(
+    ImVec4& rect, CropDragState& st,
+    ImTextureID tex_id,
+    uint32_t src_w, uint32_t src_h,
+    ImVec2 img_min, ImVec2 img_size)
+{
+    constexpr float kMinCropPx = 20.0f;
+    constexpr float kHandlePx = 8.0f;
+    constexpr float kHandleHit = 10.0f;     // generous hit area for handles
+
+    if (src_w == 0 || src_h == 0 || img_size.x <= 0 || img_size.y <= 0)
+        return CropAction::Active;
+
+    // Helper: convert source pixel coords -> screen rect
+    auto src_to_screen = [&](ImVec4 r) -> ImVec4 {
+        float sx = img_size.x / (float)src_w;
+        float sy = img_size.y / (float)src_h;
+        return ImVec4(img_min.x + r.x * sx,
+                      img_min.y + r.y * sy,
+                      img_min.x + r.z * sx,
+                      img_min.y + r.w * sy);
+    };
+    // Helper: convert screen point -> source pixel coords
+    auto screen_to_src = [&](ImVec2 p) -> ImVec2 {
+        float sx = (float)src_w / img_size.x;
+        float sy = (float)src_h / img_size.y;
+        return ImVec2((p.x - img_min.x) * sx,
+                      (p.y - img_min.y) * sy);
+    };
+    // Helper: clamp rect to image bounds
+    auto clamp_rect = [&](ImVec4 r) -> ImVec4 {
+        // When clamping x/y to 0, shift z/w by the same delta so the rect
+        // keeps its original width/height instead of collapsing to the
+        // minimum size.  This prevents a visible "collapse" when the user
+        // body-drags the selection off the left or top edge.
+        if (r.x < 0) {
+            r.z -= r.x;     // r.x is negative, so this adds |r.x| to r.z
+            r.x = 0;
+        }
+        if (r.y < 0) {
+            r.w -= r.y;     // r.y is negative, so this adds |r.y| to r.w
+            r.y = 0;
+        }
+        if (r.z > (float)src_w) r.z = (float)src_w;
+        if (r.w > (float)src_h) r.w = (float)src_h;
+        // Enforce minimum size
+        if (r.z - r.x < kMinCropPx) {
+            float c = (r.x + r.z) * 0.5f;
+            r.x = std::max(0.0f, c - kMinCropPx * 0.5f);
+            r.z = std::min((float)src_w, r.x + kMinCropPx);
+            if (r.z - r.x < kMinCropPx) {
+                r.z = std::min((float)src_w, r.x + kMinCropPx);
+            }
+        }
+        if (r.w - r.y < kMinCropPx) {
+            float c = (r.y + r.w) * 0.5f;
+            r.y = std::max(0.0f, c - kMinCropPx * 0.5f);
+            r.w = std::min((float)src_h, r.y + kMinCropPx);
+            if (r.w - r.y < kMinCropPx) {
+                r.w = std::min((float)src_h, r.y + kMinCropPx);
+            }
+        }
+        return r;
+    };
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // 1) Dim overlay over the whole image
+    dl->AddRectFilled(img_min,
+                      ImVec2(img_min.x + img_size.x, img_min.y + img_size.y),
+                      IM_COL32(0, 0, 0, 140));
+
+    // 2) Selection rect (clamped, drawn in screen coords)
+    rect = clamp_rect(rect);
+    ImVec4 sel_screen = src_to_screen(rect);
+    ImVec2 s0(sel_screen.x, sel_screen.y);
+    ImVec2 s1(sel_screen.z, sel_screen.w);
+
+    // Redraw the image in the selection area so the dim layer doesn't
+    // cover it. UV is mapped from the source's crop region.
+    if (tex_id) {
+        ImVec2 uv0(rect.x / (float)src_w, rect.y / (float)src_h);
+        ImVec2 uv1(rect.z / (float)src_w, rect.w / (float)src_h);
+        dl->AddImage(tex_id, s0, s1, uv0, uv1,
+                     IM_COL32(255, 255, 255, 255));
+    } else {
+        // Fallback: just a translucent white wash so the user can see the
+        // selection area is "different" from the dim surroundings.
+        dl->AddRectFilled(s0, s1, IM_COL32(255, 255, 255, 30));
+    }
+    // Border
+    dl->AddRect(s0, s1, IM_COL32(255, 255, 255, 255), 0.0f, 0, 2.0f);
+
+    // 3) 8 handles (4 corners + 4 edge midpoints)
+    ImVec2 corners[8] = {
+        ImVec2(s0.x, s0.y),                 // 0: TL
+        ImVec2(s1.x, s0.y),                 // 1: TR
+        ImVec2(s1.x, s1.y),                 // 2: BR
+        ImVec2(s0.x, s1.y),                 // 3: BL
+        ImVec2((s0.x + s1.x) * 0.5f, s0.y), // 4: T
+        ImVec2(s1.x, (s0.y + s1.y) * 0.5f), // 5: R
+        ImVec2((s0.x + s1.x) * 0.5f, s1.y), // 6: B
+        ImVec2(s0.x, (s0.y + s1.y) * 0.5f), // 7: L
+    };
+    for (int i = 0; i < 8; ++i) {
+        dl->AddRectFilled(
+            ImVec2(corners[i].x - kHandlePx * 0.5f, corners[i].y - kHandlePx * 0.5f),
+            ImVec2(corners[i].x + kHandlePx * 0.5f, corners[i].y + kHandlePx * 0.5f),
+            IM_COL32(255, 255, 255, 255));
+        dl->AddRect(
+            ImVec2(corners[i].x - kHandlePx * 0.5f, corners[i].y - kHandlePx * 0.5f),
+            ImVec2(corners[i].x + kHandlePx * 0.5f, corners[i].y + kHandlePx * 0.5f),
+            IM_COL32(0, 0, 0, 255), 0.0f, 0, 1.0f);
+    }
+
+    // 4) Toolbar (Confirm/Cancel) — rendered directly in the parent window
+    //    (no separate child window) to avoid input-routing issues where
+    //    clicks on the image get intercepted by the parent window's title
+    //    bar or the toolbar steals focus.  The background is drawn first
+    //    (via the draw list) so the buttons render on top of it.
+    const float tb_fp_x = 6.0f, tb_fp_y = 4.0f;
+    const float tb_gap = ImGui::GetStyle().ItemSpacing.x;
+    const ImVec2 confirm_sz = ImGui::CalcTextSize("Confirm");
+    const ImVec2 cancel_sz  = ImGui::CalcTextSize("Cancel");
+    const float tb_w = (confirm_sz.x + tb_fp_x * 2) + tb_gap
+                     + (cancel_sz.x  + tb_fp_x * 2);
+    const float tb_h = std::max(confirm_sz.y, cancel_sz.y) + tb_fp_y * 2;
+    const ImVec2 tb_tl = img_min;
+    const ImVec2 tb_br(tb_tl.x + tb_w, tb_tl.y + tb_h);
+
+    // Draw background rounded rect BEFORE buttons so they stack on top
+    dl->AddRectFilled(tb_tl, tb_br, IM_COL32(0, 0, 0, 178), 4.0f);
+
+    // Render buttons into the parent window at the toolbar position
+    ImGui::SetCursorScreenPos(tb_tl);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(tb_fp_x, tb_fp_y));
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.15f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1, 1, 1, 0.25f));
+    ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1, 1, 1, 1));
+
+    CropAction action = CropAction::Active;
+    if (ImGui::Button("Confirm")) {
+        action = CropAction::Confirm;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+        action = CropAction::Cancel;
+    }
+
+    ImGui::PopStyleColor(4);
+    ImGui::PopStyleVar();
+
+    ImVec2 toolbar_min = tb_tl;
+    ImVec2 toolbar_max = tb_br;
+
+    // 5) Mouse input — skip clicks that fall inside the toolbar so the
+    //    Confirm/Cancel buttons aren't treated as crop drags.
+    ImVec2 mouse = ImGui::GetMousePos();
+    bool mouse_in_toolbar = mouse.x >= toolbar_min.x && mouse.x <= toolbar_max.x
+                         && mouse.y >= toolbar_min.y && mouse.y <= toolbar_max.y;
+    bool mouse_in_image = !mouse_in_toolbar
+                       && mouse.x >= img_min.x && mouse.x <= img_min.x + img_size.x
+                       && mouse.y >= img_min.y && mouse.y <= img_min.y + img_size.y;
+    bool mouse_down = ImGui::IsMouseDown(0);
+    bool mouse_clicked = ImGui::IsMouseClicked(0);
+
+    // Determine which handle (if any) the mouse is over
+    int hit_handle = -1;
+    if (mouse_in_image) {
+        for (int i = 0; i < 8; ++i) {
+            if (fabsf(mouse.x - corners[i].x) <= kHandleHit * 0.5f
+             && fabsf(mouse.y - corners[i].y) <= kHandleHit * 0.5f) {
+                hit_handle = i;
+                break;
+            }
+        }
+    }
+    st.handle_hover = hit_handle;
+
+    // Cursor feedback based on what's being hovered
+    if (st.dragging) {
+        if (st.handle == 8) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        else if (st.handle >= 0 && st.handle <= 3) {
+            // Diagonal resize cursors
+            int diag = (st.handle == 0 || st.handle == 2) ? 0 : 1;
+            ImGui::SetMouseCursor(diag == 0 ? ImGuiMouseCursor_ResizeNWSE : ImGuiMouseCursor_ResizeNESW);
+        } else if (st.handle >= 4 && st.handle <= 7) {
+            ImGui::SetMouseCursor((st.handle == 4 || st.handle == 6)
+                ? ImGuiMouseCursor_ResizeNS : ImGuiMouseCursor_ResizeEW);
+        }
+    } else if (hit_handle >= 0) {
+        if (hit_handle <= 3) {
+            int diag = (hit_handle == 0 || hit_handle == 2) ? 0 : 1;
+            ImGui::SetMouseCursor(diag == 0 ? ImGuiMouseCursor_ResizeNWSE : ImGuiMouseCursor_ResizeNESW);
+        } else if (hit_handle >= 4 && hit_handle <= 7) {
+            ImGui::SetMouseCursor((hit_handle == 4 || hit_handle == 6)
+                ? ImGuiMouseCursor_ResizeNS : ImGuiMouseCursor_ResizeEW);
+        }
+    } else if (mouse_in_image && mouse.x >= s0.x && mouse.x <= s1.x
+            && mouse.y >= s0.y && mouse.y <= s1.y) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    }
+
+    if (!st.dragging) {
+        if (mouse_clicked && mouse_in_image) {
+            if (hit_handle >= 0) {
+                // Start handle drag
+                st.dragging = true;
+                st.handle = hit_handle;
+                st.start = mouse;
+                // Anchor: for corners, opposite corner. For edges, we
+                // preserve the opposite edge automatically by only mutating
+                // the dragged edge in the drag code below, so anchor isn't
+                // needed for edges.
+                if (hit_handle == 0) st.anchor = ImVec2(rect.z, rect.w);
+                else if (hit_handle == 1) st.anchor = ImVec2(rect.x, rect.w);
+                else if (hit_handle == 2) st.anchor = ImVec2(rect.x, rect.y);
+                else if (hit_handle == 3) st.anchor = ImVec2(rect.z, rect.y);
+            } else if (mouse.x >= s0.x && mouse.x <= s1.x
+                    && mouse.y >= s0.y && mouse.y <= s1.y) {
+                // Start body move
+                st.dragging = true;
+                st.handle = 8;
+                ImVec2 src_mouse = screen_to_src(mouse);
+                st.anchor = ImVec2(src_mouse.x - rect.x, src_mouse.y - rect.y);
+            } else {
+                // Click outside selection: start a fresh draw anchored at the
+                // click. The user drags to define the area.
+                ImVec2 src_mouse = screen_to_src(mouse);
+                st.dragging = true;
+                st.handle = 9;  // 9 = initial-draw mode
+                rect = ImVec4(src_mouse.x, src_mouse.y, src_mouse.x, src_mouse.y);
+                st.anchor = src_mouse;
+            }
+        }
+    } else {
+        // In-progress drag
+        if (!mouse_down) {
+            st.dragging = false;
+            st.handle = -1;
+        } else if (st.handle == 8) {
+            // Body move
+            ImVec2 src_mouse = screen_to_src(mouse);
+            float w = rect.z - rect.x;
+            float h = rect.w - rect.y;
+            float nx = src_mouse.x - st.anchor.x;
+            float ny = src_mouse.y - st.anchor.y;
+            rect = ImVec4(nx, ny, nx + w, ny + h);
+        } else if (st.handle == 9) {
+            // Initial draw
+            ImVec2 src_mouse = screen_to_src(mouse);
+            rect = ImVec4(st.anchor.x, st.anchor.y, src_mouse.x, src_mouse.y);
+            // Normalize in case the user drags right-to-left or bottom-to-top
+            if (rect.z < rect.x) std::swap(rect.x, rect.z);
+            if (rect.w < rect.y) std::swap(rect.y, rect.w);
+        } else {
+        // Handle drag. Corners (0-3) use the stored anchor; edges (4-7)
+        // mutate only the dragged edge and preserve the rest of the rect.
+        ImVec2 src_mouse = screen_to_src(mouse);
+        float ax = st.anchor.x, ay = st.anchor.y;
+        float mx = src_mouse.x, my = src_mouse.y;
+        switch (st.handle) {
+            case 0: rect = ImVec4(mx, my, ax, ay); break; // TL drag
+            case 1: rect = ImVec4(ax, my, mx, ay); break; // TR drag
+            case 2: rect = ImVec4(ax, ay, mx, my); break; // BR drag
+            case 3: rect = ImVec4(mx, ay, ax, my); break; // BL drag
+            case 4: rect = ImVec4(rect.x, my, rect.z, rect.w); break; // T
+            case 5: rect = ImVec4(rect.x, rect.y, mx, rect.w); break; // R
+            case 6: rect = ImVec4(rect.x, rect.y, rect.z, my); break; // B
+            case 7: rect = ImVec4(mx, rect.y, rect.z, rect.w); break; // L
+        }
+        // Normalize in case the drag inverted the rect
+        if (rect.z < rect.x) std::swap(rect.x, rect.z);
+        if (rect.w < rect.y) std::swap(rect.y, rect.w);
+        }
+    }
+
+    rect = clamp_rect(rect);
+    return action;
+}
+
 void Steam_Overlay::render_pinned_screenshot()
 {
     if (pinned_screenshots.empty())
@@ -3727,9 +4100,14 @@ void Steam_Overlay::render_pinned_screenshot()
     bool overlay_closed = !show_overlay && prev_overlay_state;
     prev_overlay_state = show_overlay;
 
-    // Window-decoration overhead (needed for stable sizing)
-    const float pad_x = 2.0f * ImGui::GetStyle().WindowPadding.x;
-    const float pad_y = 2.0f * ImGui::GetStyle().WindowPadding.y;
+    // Window-decoration overhead (needed for stable sizing).
+    // The content area inside a window subtracts both WindowPadding and
+    // WindowBorderSize from the outer size, so both must be included here to
+    // avoid a frame-by-frame drift that causes runaway shrinking.
+    const float pad_x = 2.0f * (ImGui::GetStyle().WindowPadding.x
+                                + ImGui::GetStyle().WindowBorderSize);
+    const float pad_y = 2.0f * (ImGui::GetStyle().WindowPadding.y
+                                + ImGui::GetStyle().WindowBorderSize);
     const float title_bar_h = show_overlay ? ImGui::GetFrameHeight() : 0;
     // Controls (separator + opacity slider) — accurately measured so no gap shows
     const float controls_h = ImGui::GetFrameHeightWithSpacing()        // slider + its trailing spacing
@@ -3766,10 +4144,11 @@ void Steam_Overlay::render_pinned_screenshot()
             ImVec2 img = pin.image_disp;
             bool valid = img.x >= 50.0f && img.y >= 30.0f;
             if (!valid && pin.pixels_w > 0 && pin.pixels_h > 0 && pin.size.x > 0 && pin.size.y > 0) {
-                // Fallback: derive from pin.size via aspect ratio
-                float s = std::min(pin.size.x / (float)pin.pixels_w,
-                                   pin.size.y / (float)pin.pixels_h);
-                img = ImVec2((float)pin.pixels_w * s, (float)pin.pixels_h * s);
+                // Fallback: derive from pin.size via crop aspect ratio
+                float crop_w = std::max(1.0f, pin.crop_rect.z - pin.crop_rect.x);
+                float crop_h = std::max(1.0f, pin.crop_rect.w - pin.crop_rect.y);
+                float s = std::min(pin.size.x / crop_w, pin.size.y / crop_h);
+                img = ImVec2(crop_w * s, crop_h * s);
                 valid = img.x >= 50.0f && img.y >= 30.0f;
             }
             if (!valid) {
@@ -3801,7 +4180,14 @@ void Steam_Overlay::render_pinned_screenshot()
         ImGui::SetNextWindowSizeConstraints(ImVec2(100, 60), ImVec2(8192, 8192));
         ImGui::SetNextWindowBgAlpha(pin.opacity);
 
-        if (ImGui::Begin(wnd_id, &pin.open, flags)) {
+        // In crop mode, prevent the user from accidentally moving/resizing the
+        // pin window (window movement during drag-to-select is confusing).
+        ImGuiWindowFlags crop_flags = flags;
+        if (pin.crop_mode) {
+            crop_flags |= ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize;
+        }
+
+        if (ImGui::Begin(wnd_id, &pin.open, crop_flags)) {
             // Bring pin to front when requested (new pin, overlay opens)
             if (overlay_opened || pin.focus_requested) {
                 ImGui::SetWindowFocus(wnd_id);
@@ -3811,12 +4197,33 @@ void Steam_Overlay::render_pinned_screenshot()
             ImVec2 avail = ImGui::GetContentRegionAvail();
             float image_avail_y = show_overlay ? avail.y - controls_h : avail.y;
 
+            // Normalize crop_rect: if zero/empty, default to full image
+            if (pin.crop_rect.z <= pin.crop_rect.x || pin.crop_rect.w <= pin.crop_rect.y) {
+                pin.crop_rect = ImVec4(0, 0, (float)pin.pixels_w, (float)pin.pixels_h);
+            }
+
+            // In crop_mode we render the FULL image so the user can see the source
+            // to crop from; the dim overlay + selection rect is drawn on top.
+            // Otherwise we render only the cropped region via UV mapping.
+            float src_w = pin.crop_mode ? (float)pin.pixels_w
+                                        : (pin.crop_rect.z - pin.crop_rect.x);
+            float src_h = pin.crop_mode ? (float)pin.pixels_h
+                                        : (pin.crop_rect.w - pin.crop_rect.y);
+            ImVec2 uv0 = pin.crop_mode ? ImVec2(0, 0)
+                                       : ImVec2(pin.crop_rect.x / (float)pin.pixels_w,
+                                                pin.crop_rect.y / (float)pin.pixels_h);
+            ImVec2 uv1 = pin.crop_mode ? ImVec2(1, 1)
+                                       : ImVec2(pin.crop_rect.z / (float)pin.pixels_w,
+                                                pin.crop_rect.w / (float)pin.pixels_h);
+
             // Draw image at correct aspect ratio within available space
-            if (pin.pixels_w > 0 && pin.pixels_h > 0 && avail.x > 0 && image_avail_y > 0) {
-                float scale = std::min(avail.x / (float)pin.pixels_w,
-                                       image_avail_y / (float)pin.pixels_h);
-                float disp_w = (float)pin.pixels_w * scale;
-                float disp_h = (float)pin.pixels_h * scale;
+            ImVec2 img_screen_pos = ImVec2(0, 0);
+            ImVec2 img_screen_size = ImVec2(0, 0);
+            if (pin.pixels_w > 0 && pin.pixels_h > 0 && avail.x > 0 && image_avail_y > 0
+                && src_w > 0 && src_h > 0) {
+                float scale = std::min(avail.x / src_w, image_avail_y / src_h);
+                float disp_w = src_w * scale;
+                float disp_h = src_h * scale;
 
                 float off_x = (avail.x - disp_w) * 0.5f;
                 if (off_x > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + off_x);
@@ -3825,18 +4232,49 @@ void Steam_Overlay::render_pinned_screenshot()
                 ImVec2 p0 = ImGui::GetCursorScreenPos();
                 dl->AddImage(pin.texture->GetResourceId(), p0,
                     ImVec2(p0.x + disp_w, p0.y + disp_h),
-                    ImVec2(0, 0), ImVec2(1, 1),
+                    uv0, uv1,
                     IM_COL32(255, 255, 255, (int)(pin.opacity * 255.0f)));
                 ImGui::Dummy(ImVec2(disp_w, disp_h));
 
                 // Track actual image display size for closed-state shrink-wrapping
                 pin.image_disp = ImVec2(disp_w, disp_h);
+                img_screen_pos = p0;
+                img_screen_size = ImVec2(disp_w, disp_h);
+            }
+
+            if (pin.crop_mode) {
+                if (img_screen_size.x > 0 && img_screen_size.y > 0
+                    && pin.pixels_w > 0 && pin.pixels_h > 0) {
+                    ImTextureID tex = pin.texture ? pin.texture->GetResourceId() : 0;
+                    CropAction act = render_crop_editor(pin.crop_rect, pin.crop_drag,
+                        tex, pin.pixels_w, pin.pixels_h,
+                        img_screen_pos, img_screen_size);
+                    if (act == CropAction::Confirm) {
+                        // Clamp the final rect to source bounds (clamp_rect is
+                        // already called inside render_crop_editor, so this is
+                        // a no-op safety net)
+                        pin.crop_mode = false;
+                        pin.focus_requested = false;
+                        // Reset image_disp so the next frame recalculates the
+                        // window size from the (now smaller) crop_rect instead
+                        // of reusing the last crop-mode full-image size.
+                        pin.image_disp = ImVec2(0, 0);
+                    } else if (act == CropAction::Cancel) {
+                        pin.crop_rect = pin.crop_rect_prev;
+                        pin.crop_mode = false;
+                    }
+                }
+            } else if (show_overlay) {
+                ImGui::Separator();
+                ImGui::SliderFloat("Opacity", &pin.opacity, 0.1f, 1.0f, "%.2f");
+                ImGui::SameLine();
+                if (ImGui::Button("Crop")) {
+                    pin.crop_rect_prev = pin.crop_rect;
+                    pin.crop_mode = true;
+                }
             }
 
             if (show_overlay) {
-                ImGui::Separator();
-                ImGui::SliderFloat("Opacity", &pin.opacity, 0.1f, 1.0f, "%.2f");
-
                 pin.pos = ImGui::GetWindowPos();
                 // Derive image size from outer window size stripping overhead
                 ImVec2 outer = ImGui::GetWindowSize();
