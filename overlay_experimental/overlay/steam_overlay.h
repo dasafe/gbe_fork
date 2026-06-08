@@ -263,7 +263,7 @@ class Steam_Overlay
         ImVec2 image_disp = { 0, 0 };             // actual image display size (capped by aspect ratio)
         bool focus_requested = false;              // true to bring window to front on next frame
         bool open = true;                          // tracks window close-button (X) state
-        ImVec4 crop_rect = { 0, 0, 0, 0 };         // crop region (x0,y0,x1,y1) in source pixels; (0,0,0,0) = full image
+        ImVec4 crop_rect = { 0, 0, 0, 0 };         // crop region (x0,y0,x1,y1) in source pixels; (0,0,0,0) = no crop (show full image)
         ImVec4 crop_rect_prev = { 0, 0, 0, 0 };    // saved crop_rect when entering crop mode (for Cancel)
         bool crop_mode = false;                    // true while the crop editor is open for this pin
         CropDragState crop_drag{};                 // per-pin drag state for the crop editor

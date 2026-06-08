@@ -3302,7 +3302,6 @@ void Steam_Overlay::render_gallery_window()
                             }
                             stbi_image_free(img);
                         }
-                        pin.crop_rect = ImVec4(0, 0, (float)pin.pixels_w, (float)pin.pixels_h);
                         pin.focus_requested = true;
                         pinned_screenshots.push_back(std::move(pin));
                     }
@@ -3555,7 +3554,6 @@ void Steam_Overlay::render_gallery_window()
                                 if (pin.texture && !pin.pixels.empty())
                                     pin.texture->AttachResource(pin.pixels.data(), pin.pixels_w, pin.pixels_h);
                             }
-                            pin.crop_rect = ImVec4(0, 0, (float)pin.pixels_w, (float)pin.pixels_h);
                             pin.focus_requested = true;
                             pinned_screenshots.push_back(std::move(pin));
 
@@ -3855,17 +3853,11 @@ Steam_Overlay::CropAction Steam_Overlay::render_crop_editor(
             float c = (r.x + r.z) * 0.5f;
             r.x = std::max(0.0f, c - kMinCropPx * 0.5f);
             r.z = std::min((float)src_w, r.x + kMinCropPx);
-            if (r.z - r.x < kMinCropPx) {
-                r.z = std::min((float)src_w, r.x + kMinCropPx);
-            }
         }
         if (r.w - r.y < kMinCropPx) {
             float c = (r.y + r.w) * 0.5f;
             r.y = std::max(0.0f, c - kMinCropPx * 0.5f);
             r.w = std::min((float)src_h, r.y + kMinCropPx);
-            if (r.w - r.y < kMinCropPx) {
-                r.w = std::min((float)src_h, r.y + kMinCropPx);
-            }
         }
         return r;
     };
@@ -4100,14 +4092,9 @@ void Steam_Overlay::render_pinned_screenshot()
     bool overlay_closed = !show_overlay && prev_overlay_state;
     prev_overlay_state = show_overlay;
 
-    // Window-decoration overhead (needed for stable sizing).
-    // The content area inside a window subtracts both WindowPadding and
-    // WindowBorderSize from the outer size, so both must be included here to
-    // avoid a frame-by-frame drift that causes runaway shrinking.
-    const float pad_x = 2.0f * (ImGui::GetStyle().WindowPadding.x
-                                + ImGui::GetStyle().WindowBorderSize);
-    const float pad_y = 2.0f * (ImGui::GetStyle().WindowPadding.y
-                                + ImGui::GetStyle().WindowBorderSize);
+    // Window-decoration overhead (needed for stable sizing)
+    const float pad_x = 2.0f * ImGui::GetStyle().WindowPadding.x;
+    const float pad_y = 2.0f * ImGui::GetStyle().WindowPadding.y;
     const float title_bar_h = show_overlay ? ImGui::GetFrameHeight() : 0;
     // Controls (separator + opacity slider) — accurately measured so no gap shows
     const float controls_h = ImGui::GetFrameHeightWithSpacing()        // slider + its trailing spacing
@@ -4144,9 +4131,15 @@ void Steam_Overlay::render_pinned_screenshot()
             ImVec2 img = pin.image_disp;
             bool valid = img.x >= 50.0f && img.y >= 30.0f;
             if (!valid && pin.pixels_w > 0 && pin.pixels_h > 0 && pin.size.x > 0 && pin.size.y > 0) {
-                // Fallback: derive from pin.size via crop aspect ratio
-                float crop_w = std::max(1.0f, pin.crop_rect.z - pin.crop_rect.x);
-                float crop_h = std::max(1.0f, pin.crop_rect.w - pin.crop_rect.y);
+                // Fallback: derive from pin.size via aspect ratio.
+                // If no crop rect set, use the full image dimensions.
+                float fw = (float)pin.pixels_w, fh = (float)pin.pixels_h;
+                float crop_w = (pin.crop_rect.z > pin.crop_rect.x)
+                             ? (pin.crop_rect.z - pin.crop_rect.x) : fw;
+                float crop_h = (pin.crop_rect.w > pin.crop_rect.y)
+                             ? (pin.crop_rect.w - pin.crop_rect.y) : fh;
+                crop_w = std::max(1.0f, crop_w);
+                crop_h = std::max(1.0f, crop_h);
                 float s = std::min(pin.size.x / crop_w, pin.size.y / crop_h);
                 img = ImVec2(crop_w * s, crop_h * s);
                 valid = img.x >= 50.0f && img.y >= 30.0f;
@@ -4197,24 +4190,36 @@ void Steam_Overlay::render_pinned_screenshot()
             ImVec2 avail = ImGui::GetContentRegionAvail();
             float image_avail_y = show_overlay ? avail.y - controls_h : avail.y;
 
-            // Normalize crop_rect: if zero/empty, default to full image
+            // Normalize crop_rect: (0,0,0,0) = no crop (show full image).
+            // Non-zero but inverted rects are clamped to image bounds as a safety net.
             if (pin.crop_rect.z <= pin.crop_rect.x || pin.crop_rect.w <= pin.crop_rect.y) {
-                pin.crop_rect = ImVec4(0, 0, (float)pin.pixels_w, (float)pin.pixels_h);
+                if (pin.crop_rect.x != 0 || pin.crop_rect.y != 0 ||
+                    pin.crop_rect.z != 0 || pin.crop_rect.w != 0) {
+                    // Non-zero degenerate rect — clamp to bounds
+                    pin.crop_rect.x = std::max(0.0f, std::min((float)pin.pixels_w,  pin.crop_rect.x));
+                    pin.crop_rect.y = std::max(0.0f, std::min((float)pin.pixels_h,  pin.crop_rect.y));
+                    pin.crop_rect.z = std::max(pin.crop_rect.x, std::min((float)pin.pixels_w,  pin.crop_rect.z));
+                    pin.crop_rect.w = std::max(pin.crop_rect.y, std::min((float)pin.pixels_h,  pin.crop_rect.w));
+                }
+                // Zero rect (0,0,0,0) is left as-is — means "no crop"
             }
 
             // In crop_mode we render the FULL image so the user can see the source
             // to crop from; the dim overlay + selection rect is drawn on top.
             // Otherwise we render only the cropped region via UV mapping.
-            float src_w = pin.crop_mode ? (float)pin.pixels_w
-                                        : (pin.crop_rect.z - pin.crop_rect.x);
-            float src_h = pin.crop_mode ? (float)pin.pixels_h
-                                        : (pin.crop_rect.w - pin.crop_rect.y);
-            ImVec2 uv0 = pin.crop_mode ? ImVec2(0, 0)
-                                       : ImVec2(pin.crop_rect.x / (float)pin.pixels_w,
-                                                pin.crop_rect.y / (float)pin.pixels_h);
-            ImVec2 uv1 = pin.crop_mode ? ImVec2(1, 1)
-                                       : ImVec2(pin.crop_rect.z / (float)pin.pixels_w,
-                                                pin.crop_rect.w / (float)pin.pixels_h);
+            // (0,0,0,0) crop_rect = no crop = show full image.
+            bool has_crop = pin.crop_rect.z > pin.crop_rect.x
+                         && pin.crop_rect.w > pin.crop_rect.y;
+            float src_w = (pin.crop_mode || !has_crop) ? (float)pin.pixels_w
+                                                       : (pin.crop_rect.z - pin.crop_rect.x);
+            float src_h = (pin.crop_mode || !has_crop) ? (float)pin.pixels_h
+                                                       : (pin.crop_rect.w - pin.crop_rect.y);
+            ImVec2 uv0 = (pin.crop_mode || !has_crop) ? ImVec2(0, 0)
+                                                       : ImVec2(pin.crop_rect.x / (float)pin.pixels_w,
+                                                                pin.crop_rect.y / (float)pin.pixels_h);
+            ImVec2 uv1 = (pin.crop_mode || !has_crop) ? ImVec2(1, 1)
+                                                       : ImVec2(pin.crop_rect.z / (float)pin.pixels_w,
+                                                                pin.crop_rect.w / (float)pin.pixels_h);
 
             // Draw image at correct aspect ratio within available space
             ImVec2 img_screen_pos = ImVec2(0, 0);
@@ -4270,18 +4275,28 @@ void Steam_Overlay::render_pinned_screenshot()
                 ImGui::SameLine();
                 if (ImGui::Button("Crop")) {
                     pin.crop_rect_prev = pin.crop_rect;
+                    // If no active crop, start with the full image as the selection area
+                    if (pin.crop_rect.z <= pin.crop_rect.x || pin.crop_rect.w <= pin.crop_rect.y) {
+                        pin.crop_rect = ImVec4(0, 0, (float)pin.pixels_w, (float)pin.pixels_h);
+                    }
                     pin.crop_mode = true;
                 }
             }
 
             if (show_overlay) {
                 pin.pos = ImGui::GetWindowPos();
-                // Derive image size from outer window size stripping overhead
-                ImVec2 outer = ImGui::GetWindowSize();
-                pin.size = ImVec2(outer.x - pad_x,
-                                  outer.y - controls_h - pad_y - title_bar_h);
+                // Use the actual content region avail (from GetContentRegionAvail)
+                // instead of deriving from outer size minus estimated overhead,
+                // so there is zero mismatch between what the rendering sees
+                // and what the snap uses for sizing and re-centering next frame.
+                pin.size = ImVec2(avail.x, image_avail_y);
                 if (pin.size.x < 50.0f) pin.size.x = 50.0f;
                 if (pin.size.y < 30.0f) pin.size.y = 30.0f;
+            } else {
+                // Track position and size even with overlay closed so the first
+                // overlay-on frame doesn't work with stale values.
+                pin.pos = ImGui::GetWindowPos();
+                pin.size = ImVec2(avail.x, avail.y);
             }
         }
         ImGui::End();
