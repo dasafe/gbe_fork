@@ -3435,10 +3435,18 @@ void Steam_Overlay::render_gallery_window()
                     // Confirm action creates a new pin with preview_crop_rect.
                     // Cancel exits crop mode and restores the previous rect.
                     if (preview_crop_mode) {
+                        // (0,0,0,0) = no selection — user will click-and-drag.
+                        // Non-zero degenerate rect: clamp to bounds as safety net.
                         if (preview_crop_rect.z <= preview_crop_rect.x
                             || preview_crop_rect.w <= preview_crop_rect.y) {
-                            preview_crop_rect = ImVec4(0, 0,
-                                (float)preview_pixels_w, (float)preview_pixels_h);
+                            if (preview_crop_rect.x != 0 || preview_crop_rect.y != 0 ||
+                                preview_crop_rect.z != 0 || preview_crop_rect.w != 0) {
+                                preview_crop_rect.x = std::max(0.0f, std::min((float)preview_pixels_w, preview_crop_rect.x));
+                                preview_crop_rect.y = std::max(0.0f, std::min((float)preview_pixels_h, preview_crop_rect.y));
+                                preview_crop_rect.z = std::max(preview_crop_rect.x, std::min((float)preview_pixels_w, preview_crop_rect.z));
+                                preview_crop_rect.w = std::max(preview_crop_rect.y, std::min((float)preview_pixels_h, preview_crop_rect.w));
+                            }
+                            // Zero rect (0,0,0,0) left as-is — means "no selection"
                         }
                         CropAction act = render_crop_editor(preview_crop_rect,
                             preview_crop_drag,
@@ -3562,9 +3570,7 @@ void Steam_Overlay::render_gallery_window()
                         ImGui::SameLine();
 
                         if (ImGui::Button("Crop")) {
-                            preview_crop_rect_prev = ImVec4(0, 0,
-                                (float)preview_pixels_w, (float)preview_pixels_h);
-                            preview_crop_rect = preview_crop_rect_prev;
+                            preview_crop_rect_prev = preview_crop_rect;
                             preview_crop_mode = true;
                         }
                         ImGui::SameLine();
@@ -4163,7 +4169,20 @@ void Steam_Overlay::render_pinned_screenshot()
             }
 
             ImGui::SetNextWindowPos(pin.pos, ImGuiCond_Always);
-            ImGui::SetNextWindowSize(new_size, ImGuiCond_Always);
+
+            // Hysteresis: only change window size when the difference is
+            // meaningful (>0.5px).  The snap+rendering feedback loop
+            // (SetNextWindowSize → outer → avail → image_disp → new_size)
+            // can accumulate sub-pixel float error frame by frame,
+            // causing continuous visible shrinking/growing.  Skipping
+            // SetNextWindowSize when the change is negligible locks the
+            // window to its current actual size and breaks the loop.
+            if (first_frame ||
+                pin.last_outer.x == 0.0f || pin.last_outer.y == 0.0f ||
+                fabsf(new_size.x - pin.last_outer.x) > 0.5f ||
+                fabsf(new_size.y - pin.last_outer.y) > 0.5f) {
+                ImGui::SetNextWindowSize(new_size, ImGuiCond_Always);
+            }
         } else {
             ImGui::SetNextWindowPos(pin.pos, first_frame
                 ? ImGuiCond_Always : ImGuiCond_FirstUseEver);
@@ -4303,6 +4322,10 @@ void Steam_Overlay::render_pinned_screenshot()
                 pin.pos = ImGui::GetWindowPos();
                 pin.size = ImVec2(avail.x, avail.y);
             }
+            // Record the actual window outer size for the next frame's
+            // hysteresis comparison.  Must come after the window has been
+            // fully sized and positioned by ImGui::Begin+SetNextWindowSize.
+            pin.last_outer = ImGui::GetWindowSize();
         }
         ImGui::End();
     }

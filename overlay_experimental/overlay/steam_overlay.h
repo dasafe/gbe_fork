@@ -261,6 +261,7 @@ class Steam_Overlay
         ImVec2 pos = { 100, 100 };
         ImVec2 size = { 320, 180 };
         ImVec2 image_disp = { 0, 0 };             // actual image display size (capped by aspect ratio)
+        ImVec2 last_outer = { 0, 0 };             // actual window outer size from last frame (drift guard)
         bool focus_requested = false;              // true to bring window to front on next frame
         bool open = true;                          // tracks window close-button (X) state
         ImVec4 crop_rect = { 0, 0, 0, 0 };         // crop region (x0,y0,x1,y1) in source pixels; (0,0,0,0) = no crop (show full image)
