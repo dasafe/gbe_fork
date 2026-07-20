@@ -158,6 +158,7 @@ struct Overlay_Appearance {
     uint32 notification_duration_screenshot = 1000; // screenshot saved duration (millisec)
 
     std::string ach_unlock_datetime_format = "%Y/%m/%d - %H:%M:%S";
+    std::string screenshot_datetime_format = "%Y/%m/%d - %H:%M:%S";
     bool show_notification_history = false;
     bool show_playtime_in_user_info = false;
     bool show_achievement_list = false;
@@ -221,6 +222,7 @@ private:
     CGameID game_id{};
     std::string name{};
     std::string language{}; // default "english"
+    std::string overlay_language{}; // for overlay language
     CSteamID lobby_id = k_steamIDNil;
 
     bool offline = false;
@@ -376,6 +378,17 @@ public:
     // disable all overlay warnings
     bool disable_overlay_warning_any = false;
     Overlay_Appearance overlay_appearance{};
+    // toggle overlay buttons
+    bool overlay_show_button_user_info = true;
+    bool overlay_show_button_achievements = true;
+    bool overlay_show_button_test_achievement = true;
+    bool overlay_show_button_copy_id = true;
+    bool overlay_show_button_screenshots = true;
+    bool overlay_show_button_history = true;
+    bool overlay_show_button_settings = true;
+    bool overlay_show_checkbox_fps = true;
+    bool overlay_show_checkbox_frametime = true;
+    bool overlay_show_checkbox_playtime = true;
     // whether to auto accept any overlay invites
     bool auto_accept_any_overlay_invites = false;
     // list of user steam IDs to auto-accept invites from
@@ -390,6 +403,9 @@ public:
     bool overlay_always_show_playtime = false;
     // keys used to toggle the overlay, default = Shift + Tab
     std::vector<std::string> overlay_toggle_keys{};
+    // 0=disable the F12 screenshot feature
+    // default=1
+    bool enable_screenshot = true;
     std::vector<std::string> overlay_screenshot_keys{};
     // minimum time interval between achievement notifications (in milliseconds)
     int achievement_notification_delay_ms = 0;
@@ -434,6 +450,9 @@ public:
 
     const char *get_language();
     void set_language(const char *language);
+
+    const char *get_overlay_language();
+    void set_overlay_language(const char *language);
 
     void set_supported_languages(const std::set<std::string> &langs);
     const std::set<std::string>& get_supported_languages_set() const;

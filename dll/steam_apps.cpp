@@ -541,7 +541,10 @@ int Steam_Apps::GetLaunchCommandLine( char *pszCommandLine, int cubCommandLine )
 {
     PRINT_DEBUG_TODO();
     std::lock_guard<std::recursive_mutex> lock(global_mutex);
-    return 0;
+    if (cubCommandLine > 0 && pszCommandLine) {
+        memset(pszCommandLine, 0, cubCommandLine);
+    }
+    return 1;
 }
 
 // Check if user borrowed this game via Family Sharing, If true, call GetAppOwner() to get the lender SteamID

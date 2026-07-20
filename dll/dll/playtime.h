@@ -25,7 +25,7 @@
 
 class PlaytimeCounter {
 public:
-    explicit PlaytimeCounter(Local_Storage* local_storage);
+    explicit PlaytimeCounter(Local_Storage* local_storage, bool record_playtime = false);
     ~PlaytimeCounter();
 
     // Tick the playtime counter, call regularly
@@ -43,8 +43,11 @@ public:
     void set_pause_total(bool pause);
     void set_pause_session(bool pause);
 
+    bool get_record_playtime() const { return record_playtime; }
+
 private:
     Local_Storage* local_storage{};
+    bool record_playtime = false;
     const std::string playtime_filename = "playtime.txt";
     std::chrono::steady_clock::time_point last_tick{};
     uint64_t playtime_seconds = 0;

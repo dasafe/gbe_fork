@@ -398,6 +398,9 @@ static void load_overlay_appearance(class Settings *settings_client, class Setti
             } else if (name.compare("Achievement_Unlock_Datetime_Format") == 0) {
                 settings_client->overlay_appearance.ach_unlock_datetime_format = value;
                 settings_server->overlay_appearance.ach_unlock_datetime_format = value;
+                } else if (name.compare("Screenshot_Datetime_Format") == 0) {
+                settings_client->overlay_appearance.screenshot_datetime_format = value;
+                settings_server->overlay_appearance.screenshot_datetime_format = value;
             } else if (name.compare("Show_Notification_History") == 0) {
                 bool show = (std::stol(value, NULL) != 0);
                 settings_client->overlay_appearance.show_notification_history = show;
@@ -1665,6 +1668,36 @@ static void parse_overlay_general_config(class Settings *settings_client, class 
     settings_client->disable_overlay_warning_local_save = ini.GetBoolValue("overlay::general", "disable_warning_local_save", settings_client->disable_overlay_warning_local_save);
     settings_server->disable_overlay_warning_local_save = ini.GetBoolValue("overlay::general", "disable_warning_local_save", settings_server->disable_overlay_warning_local_save);
 
+    settings_client->overlay_show_button_user_info = ini.GetBoolValue("overlay::general", "show_button_user_info", settings_client->overlay_show_button_user_info);
+    settings_server->overlay_show_button_user_info = ini.GetBoolValue("overlay::general", "show_button_user_info", settings_server->overlay_show_button_user_info);
+
+    settings_client->overlay_show_button_achievements = ini.GetBoolValue("overlay::general", "show_button_achievements", settings_client->overlay_show_button_achievements);
+    settings_server->overlay_show_button_achievements = ini.GetBoolValue("overlay::general", "show_button_achievements", settings_server->overlay_show_button_achievements);
+
+    settings_client->overlay_show_button_test_achievement = ini.GetBoolValue("overlay::general", "show_button_test_achievement", settings_client->overlay_show_button_test_achievement);
+    settings_server->overlay_show_button_test_achievement = ini.GetBoolValue("overlay::general", "show_button_test_achievement", settings_server->overlay_show_button_test_achievement);
+
+    settings_client->overlay_show_button_copy_id = ini.GetBoolValue("overlay::general", "show_button_copy_id", settings_client->overlay_show_button_copy_id);
+    settings_server->overlay_show_button_copy_id = ini.GetBoolValue("overlay::general", "show_button_copy_id", settings_server->overlay_show_button_copy_id);
+
+    settings_client->overlay_show_button_screenshots = ini.GetBoolValue("overlay::general", "show_button_screenshots", settings_client->overlay_show_button_screenshots);
+    settings_server->overlay_show_button_screenshots = ini.GetBoolValue("overlay::general", "show_button_screenshots", settings_server->overlay_show_button_screenshots);
+
+    settings_client->overlay_show_button_history = ini.GetBoolValue("overlay::general", "show_button_history", settings_client->overlay_show_button_history);
+    settings_server->overlay_show_button_history = ini.GetBoolValue("overlay::general", "show_button_history", settings_server->overlay_show_button_history);
+
+    settings_client->overlay_show_button_settings = ini.GetBoolValue("overlay::general", "show_button_settings", settings_client->overlay_show_button_settings);
+    settings_server->overlay_show_button_settings = ini.GetBoolValue("overlay::general", "show_button_settings", settings_server->overlay_show_button_settings);
+
+    settings_client->overlay_show_checkbox_fps = ini.GetBoolValue("overlay::general", "show_checkbox_fps", settings_client->overlay_show_checkbox_fps);
+    settings_server->overlay_show_checkbox_fps = ini.GetBoolValue("overlay::general", "show_checkbox_fps", settings_server->overlay_show_checkbox_fps);
+
+    settings_client->overlay_show_checkbox_frametime = ini.GetBoolValue("overlay::general", "show_checkbox_frametime", settings_client->overlay_show_checkbox_frametime);
+    settings_server->overlay_show_checkbox_frametime = ini.GetBoolValue("overlay::general", "show_checkbox_frametime", settings_server->overlay_show_checkbox_frametime);
+
+    settings_client->overlay_show_checkbox_playtime = ini.GetBoolValue("overlay::general", "show_checkbox_playtime", settings_client->overlay_show_checkbox_playtime);
+    settings_server->overlay_show_checkbox_playtime = ini.GetBoolValue("overlay::general", "show_checkbox_playtime", settings_server->overlay_show_checkbox_playtime);
+    
     settings_client->overlay_upload_achs_icons_to_gpu = ini.GetBoolValue("overlay::general", "upload_achievements_icons_to_gpu", settings_client->overlay_upload_achs_icons_to_gpu);
     settings_server->overlay_upload_achs_icons_to_gpu = ini.GetBoolValue("overlay::general", "upload_achievements_icons_to_gpu", settings_server->overlay_upload_achs_icons_to_gpu);
 
@@ -1682,6 +1715,9 @@ static void parse_overlay_general_config(class Settings *settings_client, class 
 
     settings_client->check_for_game_updates = ini.GetBoolValue("overlay::general", "check_for_game_updates", settings_client->check_for_game_updates);
     settings_server->check_for_game_updates = ini.GetBoolValue("overlay::general", "check_for_game_updates", settings_server->check_for_game_updates);
+
+    settings_client->enable_screenshot = ini.GetBoolValue("overlay::general", "enable_screenshot", settings_client->enable_screenshot);
+    settings_server->enable_screenshot = ini.GetBoolValue("overlay::general", "enable_screenshot", settings_server->enable_screenshot);
 
     {
         auto val = ini.GetLongValue("overlay::general", "fps_averaging_window", settings_client->overlay_fps_avg_window);
@@ -2051,8 +2087,10 @@ uint32 create_localstorage_settings(Settings **settings_client_out, Settings **s
     uint32 alt_steamid_count = parse_alt_steamid_count(local_storage);
 
     // Language
-    std::string language(parse_current_language(local_storage));
-    // Supported languages, this will change the current language if needed
+    std::string requested_language(parse_current_language(local_storage));
+    std::string language = requested_language; // creating a copy for the game language
+    
+    // Supported languages
     std::set<std::string> supported_languages(parse_supported_languages(local_storage, language));
 
     bool steam_offline_mode = ini.GetBoolValue("main::connectivity", "offline", false);
@@ -2070,6 +2108,9 @@ uint32 create_localstorage_settings(Settings **settings_client_out, Settings **s
     // listen port
     settings_client->set_port(port);
     settings_server->set_port(port);
+    // provide the original 'requested_language' value, which is not affected by the txt file, as the overlay language
+    settings_client->set_overlay_language(requested_language.c_str());
+    settings_server->set_overlay_language(requested_language.c_str());
     // broadcasts list
     settings_client->custom_broadcasts = custom_broadcasts;
     settings_server->custom_broadcasts = custom_broadcasts;

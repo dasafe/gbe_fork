@@ -40,6 +40,21 @@ static bool is_game_focused()
 #endif
 }
 
+// Returns true if the game window is the currently focused foreground window.
+// On non-Windows platforms, always returns true (no focus-based pausing).
+static bool is_game_focused()
+{
+#if defined(__WINDOWS__)
+    HWND fg = GetForegroundWindow();
+    if (!fg) return false;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(fg, &pid);
+    return pid == GetCurrentProcessId();
+#else
+    return true;
+#endif
+}
+
 void Steam_Client::background_thread_proc()
 {
     auto now_ms = (unsigned long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -127,7 +142,7 @@ Steam_Client::Steam_Client()
 
     // client
     PRINT_DEBUG("init client");
-    playtime_counter = new PlaytimeCounter(local_storage);
+    playtime_counter = new PlaytimeCounter(local_storage, settings_client->record_playtime);
     steam_overlay = new Steam_Overlay(settings_client, local_storage, callback_results_client, callbacks_client, run_every_runcb, network, playtime_counter);
 
     steam_user = new Steam_User(settings_client, local_storage, network, callback_results_client, callbacks_client, false);

@@ -132,17 +132,19 @@ ESteamNetworkingAvailability Steam_Networking_Utils::GetRelayNetworkStatus( Stea
     PRINT_DEBUG("TODO %p", pDetails);
     std::lock_guard<std::recursive_mutex> lock(global_mutex);
 
+    ESteamNetworkingAvailability ret = k_ESteamNetworkingAvailability_Unknown;
     //TODO: check if this is how real steam returns it
     SteamRelayNetworkStatus_t data = {};
     if (relay_initialized) {
         data = get_network_status();
+        ret = k_ESteamNetworkingAvailability_Current;
     }
 
     if (pDetails) {
         *pDetails = data;
     }
 
-    return k_ESteamNetworkingAvailability_Current;
+    return ret;
 }
 
 float Steam_Networking_Utils::GetLocalPingLocation( SteamNetworkPingLocation_t &result )

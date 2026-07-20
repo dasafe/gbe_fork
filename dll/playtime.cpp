@@ -19,11 +19,15 @@
 
 #include <limits>
 
-PlaytimeCounter::PlaytimeCounter(Local_Storage* local_storage)
+PlaytimeCounter::PlaytimeCounter(Local_Storage* local_storage, bool record_playtime)
    : local_storage(local_storage),
+     record_playtime(record_playtime),
      last_tick(std::chrono::steady_clock::now())
 {
     load();
+    if (record_playtime) {
+        save();
+    }
 }
 
 PlaytimeCounter::~PlaytimeCounter()
@@ -68,7 +72,7 @@ void PlaytimeCounter::tick()
                 }
 
                 since_save += accrued_sec;
-                if (since_save >= 60) {
+                if (since_save >= 15) {
                     since_save = 0;
                     need_save = true;
                 }
@@ -106,6 +110,7 @@ void PlaytimeCounter::load()
 
 void PlaytimeCounter::save()
 {
+    if (!record_playtime) return;
     std::lock_guard<std::mutex> lock(mutex);
 
     std::string data = std::to_string(playtime_seconds);

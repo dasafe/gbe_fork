@@ -186,7 +186,7 @@ std::vector<uint8_t> ConvertToRGBA(const InGameOverlay::ScreenshotCallbackParame
             dst[1] = g;
             dst[2] = b;
             if (outChannels == 4) {
-                dst[3] = a;
+                dst[3] = 255;
             }
             dst += outChannels;
             srcPixel += screenshot->PixelSize;

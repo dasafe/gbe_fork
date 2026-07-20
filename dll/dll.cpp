@@ -1313,14 +1313,10 @@ static void cb_add_queue_client(std::vector<char> result, int callback)
 /// you use any of the other manual dispatch functions below.
 STEAMAPI_API void S_CALLTYPE SteamAPI_ManualDispatch_Init()
 {
-    static std::atomic_bool manual_dispatch_called = false;
-    bool not_yet = false;
-    if (manual_dispatch_called.compare_exchange_weak(not_yet, true)) {
-        PRINT_DEBUG_ENTRY();
-        Steam_Client *steam_client = get_steam_client();
-        steam_client->callback_results_server->setCbAll(&cb_add_queue_server);
-        steam_client->callback_results_client->setCbAll(&cb_add_queue_client);
-    }
+    PRINT_DEBUG_ENTRY();
+    Steam_Client *steam_client = get_steam_client();
+    steam_client->callback_results_server->setCbAll(&cb_add_queue_server);
+    steam_client->callback_results_client->setCbAll(&cb_add_queue_client);
 }
 
 /// Perform certain periodic actions that need to be performed.
