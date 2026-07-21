@@ -429,6 +429,7 @@ local common_link_win = {
     "Xinput"   .. static_postfix,
     -- imgui / overlay
     "Gdi32"    .. static_postfix,
+    "gdiplus"  .. static_postfix, -- GDI+ for JPEG thumbnail decoding in auto-setup dialog
     "Dwmapi"   .. static_postfix,
     "OpenGL32" .. static_postfix,
 }

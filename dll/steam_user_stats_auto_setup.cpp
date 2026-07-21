@@ -23,6 +23,7 @@
 #include <vector>
 #include <conio.h> // _getch
 #include <cstdarg> // va_list, va_start, va_end
+#include <gdiplus.h>
 
 
 // ============================================================
@@ -187,6 +188,602 @@ static void print_info(const char *fmt, ...)
 
 
 // ============================================================
+// Steam Store API search
+// ============================================================
+
+struct SteamSearchResult {
+    uint32 appid = 0;
+    std::string name;
+    std::string tiny_image_url;
+};
+
+static std::string url_encode(const std::string &s)
+{
+    std::string encoded;
+    for (unsigned char c : s) {
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            encoded += c;
+        } else if (c == ' ') {
+            encoded += '+';
+        } else {
+            char buf[4] = {};
+            snprintf(buf, sizeof(buf), "%%%02X", (int)c);
+            encoded += buf;
+        }
+    }
+    return encoded;
+}
+
+static std::vector<SteamSearchResult> steam_store_search(const std::string &term)
+{
+    std::vector<SteamSearchResult> results;
+
+    std::string url = "https://store.steampowered.com/api/storesearch?term="
+        + url_encode(term) + "&cc=US&l=en";
+
+    std::string resp = http_get(url, 10L);
+    if (resp.empty()) return results;
+
+    try {
+        auto json = nlohmann::json::parse(resp);
+        auto items = json["items"];
+        if (!items.is_array()) return results;
+
+        for (const auto &item : items) {
+            SteamSearchResult r;
+            r.appid = item.value("id", 0);
+            r.name = item.value("name", std::string{});
+            r.tiny_image_url = item.value("tiny_image", std::string{});
+
+            int type = item.value("type", 0);
+            if (type != 0 && type != 1) continue;
+
+            if (r.appid && !r.name.empty()) {
+                results.push_back(std::move(r));
+            }
+        }
+    } catch (...) {}
+
+    return results;
+}
+
+
+// ============================================================
+// Derive search name from executable path
+// ============================================================
+
+static std::string derive_search_name()
+{
+    std::string exe_path = get_full_exe_path();
+
+    size_t sep = exe_path.rfind('\\');
+    if (sep == std::string::npos) sep = exe_path.rfind('/');
+    if (sep == std::string::npos) return {};
+    std::string fname = exe_path.substr(sep + 1);
+
+    size_t dot = fname.rfind('.');
+    if (dot != std::string::npos) fname = fname.substr(0, dot);
+
+    static const char *suffixes[] = {
+        "-Win64-Shipping",
+        "-Shipping",
+        "-DebugGame",
+        "-UE4Editor",
+        "-UE5Editor",
+        "-Game",
+        "-Client",
+        "-Server",
+        "-Linux",
+        "-LNI",
+    };
+
+    for (const char *suf : suffixes) {
+        size_t pos = fname.rfind(suf);
+        if (pos != std::string::npos && pos + strlen(suf) == fname.size()) {
+            fname = fname.substr(0, pos);
+            break;
+        }
+    }
+
+    // Insert spaces before uppercase letters (PascalCase -> words)
+    std::string spaced;
+    for (size_t i = 0; i < fname.size(); ++i) {
+        if (i > 0 && isupper(fname[i]) && !isupper(fname[i-1]) && !isdigit(fname[i])) {
+            if (islower(fname[i-1]) || isdigit(fname[i-1])) {
+                spaced += ' ';
+            }
+        }
+        spaced += fname[i];
+    }
+    fname = std::move(spaced);
+
+    if (fname.empty()) {
+        fname = exe_path.substr(sep + 1);
+        dot = fname.rfind('.');
+        if (dot != std::string::npos) fname = fname.substr(0, dot);
+    }
+
+    return fname;
+}
+
+
+// ============================================================
+// GDI+ helper: decode JPEG data to HBITMAP
+// Requires linking gdiplus.lib (MSVC) or -lgdiplus (MinGW)
+// ============================================================
+
+static HBITMAP decode_jpeg_data(const std::vector<char> &data)
+{
+    if (data.empty()) return nullptr;
+
+    HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, data.size());
+    if (!hg) return nullptr;
+
+    void *ptr = GlobalLock(hg);
+    if (ptr) {
+        memcpy(ptr, data.data(), data.size());
+        GlobalUnlock(hg);
+    } else {
+        GlobalFree(hg);
+        return nullptr;
+    }
+
+    IStream *stream = nullptr;
+    if (CreateStreamOnHGlobal(hg, TRUE, &stream) != S_OK) {
+        GlobalFree(hg);
+        return nullptr;
+    }
+
+    Gdiplus::Bitmap gdi_bitmap(stream);
+    stream->Release();
+
+    if (gdi_bitmap.GetLastStatus() != Gdiplus::Ok) return nullptr;
+
+    HBITMAP hbm = nullptr;
+    gdi_bitmap.GetHBITMAP(Gdiplus::Color(0, 0, 0), &hbm);
+    return hbm;
+}
+
+
+// ============================================================
+// Win32 AppID Search Dialog
+// ============================================================
+
+struct ThumbnailJob {
+    uint32 appid;
+    std::string url;
+    HWND hwnd;
+};
+
+struct ThumbnailData {
+    uint32 appid;
+    std::string data;
+};
+
+static DWORD WINAPI ThumbnailDownloadProc(LPVOID param)
+{
+    auto *job = (ThumbnailJob*)param;
+
+    auto *td = new ThumbnailData();
+    td->appid = job->appid;
+
+    CurlMem mem = http_get_binary(job->url, 15L);
+    if (!mem.data.empty()) {
+        td->data.assign(mem.data.begin(), mem.data.end());
+    }
+
+    PostMessageA(job->hwnd, WM_APP, (WPARAM)td, 0);
+    delete job;
+    return 0;
+}
+
+struct AppIDSearchState {
+    std::vector<SteamSearchResult> results;
+    HWND hwnd_list{};
+    HWND hwnd_search_edit{};
+    HWND hwnd_manual_edit{};
+    HWND hwnd_select_btn{};
+    HWND hwnd_status{};
+    std::map<uint32, HBITMAP> thumbnails;
+    int pending_thumbnails{0};
+    uint32 result_appid{0};
+    bool closing{false};
+    ULONG_PTR gdiplus_token{};
+};
+
+static void cleanup_thumbnails(AppIDSearchState *state)
+{
+    for (auto &[appid, hbm] : state->thumbnails) {
+        if (hbm) DeleteObject(hbm);
+    }
+    state->thumbnails.clear();
+}
+
+static uint32 get_selected_appid(HWND hwnd_list)
+{
+    LRESULT sel = SendMessageA(hwnd_list, LB_GETCURSEL, 0, 0);
+    if (sel == LB_ERR) return 0;
+    LRESULT data = SendMessageA(hwnd_list, LB_GETITEMDATA, sel, 0);
+    if (data == LB_ERR) return 0;
+    return (uint32)data;
+}
+
+static void populate_list(AppIDSearchState *state, HWND hwnd)
+{
+    SendMessageA(state->hwnd_list, LB_RESETCONTENT, 0, 0);
+    cleanup_thumbnails(state);
+
+    for (const auto &r : state->results) {
+        LRESULT idx = SendMessageA(state->hwnd_list, LB_ADDSTRING, 0, (LPARAM)r.name.c_str());
+        if (idx != LB_ERR) {
+            SendMessageA(state->hwnd_list, LB_SETITEMDATA, idx, (LPARAM)r.appid);
+        }
+    }
+
+    if (!state->results.empty()) {
+        SendMessageA(state->hwnd_list, LB_SETCURSEL, 0, 0);
+    }
+
+    state->pending_thumbnails = 0;
+    for (const auto &r : state->results) {
+        if (r.tiny_image_url.empty()) continue;
+        state->pending_thumbnails++;
+        auto *job = new ThumbnailJob();
+        job->appid = r.appid;
+        job->url = r.tiny_image_url;
+        job->hwnd = hwnd;
+        HANDLE hThread = CreateThread(nullptr, 0, ThumbnailDownloadProc, job, 0, nullptr);
+        if (hThread) {
+            CloseHandle(hThread);
+        } else {
+            delete job;
+            state->pending_thumbnails--;
+        }
+    }
+
+    if (state->results.empty()) {
+        SendMessageA(state->hwnd_status, WM_SETTEXT, 0, (LPARAM)"No results found. Try a different search term.");
+        EnableWindow(state->hwnd_select_btn, FALSE);
+    } else {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Found %zu result(s). Double-click or press Select.", state->results.size());
+        SendMessageA(state->hwnd_status, WM_SETTEXT, 0, (LPARAM)buf);
+        EnableWindow(state->hwnd_select_btn, TRUE);
+    }
+}
+
+static LRESULT CALLBACK AppIDDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    auto *state = (AppIDSearchState*)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+
+    switch (msg) {
+    case WM_CREATE: {
+        auto *cs = (CREATESTRUCT*)lParam;
+        auto *s = (AppIDSearchState*)cs->lpCreateParams;
+        SetWindowLongPtrA(hwnd, GWLP_USERDATA, (LONG_PTR)s);
+        state = s;
+
+        Gdiplus::GdiplusStartupInput gsi;
+        Gdiplus::GdiplusStartup(&state->gdiplus_token, &gsi, nullptr);
+
+        HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+
+        // "Search Steam:"
+        CreateWindowExA(0, "STATIC", "Search Steam:",
+            WS_CHILD | WS_VISIBLE, 12, 12, 80, 22,
+            hwnd, nullptr, nullptr, nullptr);
+
+        // Search edit
+        state->hwnd_search_edit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            96, 10, 330, 24, hwnd, nullptr, nullptr, nullptr);
+        SendMessageA(state->hwnd_search_edit, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        // Search button
+        CreateWindowExA(0, "BUTTON", "Search",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            432, 10, 70, 24, hwnd, (HMENU)100, nullptr, nullptr);
+
+        // Status
+        state->hwnd_status = CreateWindowExA(0, "STATIC", "Enter a game name to search, or press Search to use auto-detected name.",
+            WS_CHILD | WS_VISIBLE, 12, 38, 490, 18,
+            hwnd, nullptr, nullptr, nullptr);
+        SendMessageA(state->hwnd_status, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        // Listbox (owner-drawn with thumbnails)
+        state->hwnd_list = CreateWindowExA(WS_EX_CLIENTEDGE, "LISTBOX", "",
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP |
+            LBS_OWNERDRAWVARIABLE | LBS_HASSTRINGS | LBS_NOTIFY,
+            12, 60, 490, 250, hwnd, (HMENU)200, nullptr, nullptr);
+        SendMessageA(state->hwnd_list, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        // Manual AppID
+        CreateWindowExA(0, "STATIC", "Or enter AppID manually:",
+            WS_CHILD | WS_VISIBLE, 12, 318, 140, 22,
+            hwnd, nullptr, nullptr, nullptr);
+
+        state->hwnd_manual_edit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
+            WS_CHILD | WS_VISIBLE | ES_NUMBER | ES_AUTOHSCROLL,
+            156, 316, 100, 24, hwnd, nullptr, nullptr, nullptr);
+        SendMessageA(state->hwnd_manual_edit, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        // Select button
+        state->hwnd_select_btn = CreateWindowExA(0, "BUTTON", "Select",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_DEFPUSHBUTTON,
+            270, 316, 80, 26, hwnd, (HMENU)101, nullptr, nullptr);
+        SendMessageA(state->hwnd_select_btn, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        // Cancel button
+        CreateWindowExA(0, "BUTTON", "Cancel",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            360, 316, 80, 26, hwnd, (HMENU)102, nullptr, nullptr);
+
+        // Pre-populate if results exist
+        if (!state->results.empty()) {
+            populate_list(state, hwnd);
+        }
+        return 0;
+    }
+
+    case WM_CLOSE:
+        state->closing = true;
+        state->result_appid = 0;
+        DestroyWindow(hwnd);
+        return 0;
+
+    case WM_DESTROY:
+        if (state) {
+            cleanup_thumbnails(state);
+            Gdiplus::GdiplusShutdown(state->gdiplus_token);
+        }
+        PostQuitMessage(0);
+        return 0;
+
+    case WM_COMMAND: {
+        WORD id = LOWORD(wParam);
+        WORD code = HIWORD(wParam);
+
+        if (id == 100) { // Search
+            char buf[256] = {};
+            GetWindowTextA(state->hwnd_search_edit, buf, sizeof(buf));
+            std::string term = buf;
+            auto start = term.find_first_not_of(" \t\r\n");
+            if (start != std::string::npos) term = term.substr(start);
+            auto end = term.find_last_not_of(" \t\r\n");
+            if (end != std::string::npos) term = term.substr(0, end + 1);
+            if (term.empty()) break;
+
+            SendMessageA(state->hwnd_status, WM_SETTEXT, 0, (LPARAM)"Searching Steam...");
+
+            MSG dummy;
+            while (PeekMessageA(&dummy, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&dummy);
+                DispatchMessageA(&dummy);
+            }
+
+            state->results = steam_store_search(term);
+            populate_list(state, hwnd);
+            return 0;
+        }
+
+        if (id == 101) { // Select
+            uint32 appid = get_selected_appid(state->hwnd_list);
+            if (!appid) {
+                char buf[32] = {};
+                GetWindowTextA(state->hwnd_manual_edit, buf, sizeof(buf));
+                if (buf[0]) {
+                    try { appid = (uint32)std::stoul(buf); } catch (...) {}
+                }
+            }
+
+            if (appid) {
+                state->closing = true;
+                state->result_appid = appid;
+                DestroyWindow(hwnd);
+            } else {
+                SendMessageA(state->hwnd_status, WM_SETTEXT, 0,
+                    (LPARAM)"Select a game from the list or enter an AppID manually.");
+                MessageBeep(MB_ICONWARNING);
+            }
+            return 0;
+        }
+
+        if (id == 102) { // Cancel
+            state->closing = true;
+            state->result_appid = 0;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+
+        if (id == 200 && code == LBN_DBLCLK) { // Listbox double-click
+            uint32 appid = get_selected_appid(state->hwnd_list);
+            if (appid) {
+                state->closing = true;
+                state->result_appid = appid;
+                DestroyWindow(hwnd);
+            }
+            return 0;
+        }
+        break;
+    }
+
+    case WM_APP: {
+        auto *td = (ThumbnailData*)wParam;
+        if (td) {
+            if (!td->data.empty() && state && !state->closing) {
+                HBITMAP hbm = decode_jpeg_data(td->data);
+                if (hbm) {
+                    state->thumbnails[td->appid] = hbm;
+                    InvalidateRect(state->hwnd_list, nullptr, TRUE);
+                }
+            }
+            delete td;
+        }
+        return 0;
+    }
+
+    case WM_MEASUREITEM: {
+        auto *mis = (MEASUREITEMSTRUCT*)lParam;
+        if (mis->CtlType == ODT_LISTBOX) {
+            mis->itemHeight = 52;
+            return TRUE;
+        }
+        return FALSE;
+    }
+
+    case WM_DRAWITEM: {
+        auto *dis = (DRAWITEMSTRUCT*)lParam;
+        if (dis->CtlType != ODT_LISTBOX || !state) return FALSE;
+
+        uint32 appid = (uint32)dis->itemData;
+        HDC hdc = dis->hDC;
+        RECT rc = dis->rcItem;
+
+        // Background
+        if (dis->itemState & ODS_SELECTED) {
+            FillRect(hdc, &rc, GetSysColorBrush(COLOR_HIGHLIGHT));
+            SetTextColor(hdc, GetSysColor(COLOR_HIGHLIGHTTEXT));
+        } else {
+            FillRect(hdc, &rc, GetSysColorBrush(COLOR_WINDOW));
+            SetTextColor(hdc, GetSysColor(COLOR_WINDOWTEXT));
+        }
+        SetBkMode(hdc, TRANSPARENT);
+
+        // Thumbnail (120x45)
+        RECT rcImg = rc;
+        rcImg.left += 4;
+        rcImg.top += 3;
+        rcImg.bottom = rcImg.top + 45;
+        rcImg.right = rcImg.left + 120;
+
+        auto it = state->thumbnails.find(appid);
+        if (it != state->thumbnails.end() && it->second) {
+            HDC hdcMem = CreateCompatibleDC(hdc);
+            if (hdcMem) {
+                SelectObject(hdcMem, it->second);
+                SetStretchBltMode(hdc, HALFTONE);
+                StretchBlt(hdc, rcImg.left, rcImg.top,
+                    120, 45, hdcMem, 0, 0, 231, 87, SRCCOPY);
+                DeleteDC(hdcMem);
+            }
+        } else {
+            HPEN hPen = CreatePen(PS_SOLID, 1, RGB(180, 180, 180));
+            HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
+            SelectObject(hdc, GetStockObject(NULL_BRUSH));
+            Rectangle(hdc, rcImg.left, rcImg.top, rcImg.right, rcImg.bottom);
+            SelectObject(hdc, hOldPen);
+            DeleteObject(hPen);
+        }
+
+        HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+
+        // Game name
+        char name_buf[256] = {};
+        SendMessageA(dis->hwndItem, LB_GETTEXT, dis->itemID, (LPARAM)name_buf);
+
+        RECT rcName = rc;
+        rcName.left += 132;
+        rcName.top += 5;
+        rcName.right -= 5;
+        DrawTextA(hdc, name_buf, -1, &rcName,
+            DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+
+        // AppID (dimmed)
+        char appid_buf[32];
+        snprintf(appid_buf, sizeof(appid_buf), "AppID: %u", appid);
+        RECT rcID = rc;
+        rcID.left += 132;
+        rcID.top += 26;
+        rcID.right -= 5;
+        SetTextColor(hdc, dis->itemState & ODS_SELECTED ?
+            GetSysColor(COLOR_HIGHLIGHTTEXT) : GetSysColor(COLOR_GRAYTEXT));
+        DrawTextA(hdc, appid_buf, -1, &rcID,
+            DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+
+        SelectObject(hdc, hOldFont);
+        return TRUE;
+    }
+
+    case WM_DELETEITEM:
+        return TRUE;
+    }
+
+    return DefWindowProcA(hwnd, msg, wParam, lParam);
+}
+
+
+// ============================================================
+// Run the AppID search dialog; returns 0 if cancelled
+// ============================================================
+
+static uint32 run_appid_dialog(const std::string &auto_search_name)
+{
+    const char *CLASS_NAME = "GoldbergAppIDSearch";
+
+    WNDCLASSEXA wc = {};
+    wc.cbSize = sizeof(WNDCLASSEXA);
+    wc.lpfnWndProc = AppIDDlgProc;
+    wc.hInstance = GetModuleHandleA(nullptr);
+    wc.hCursor = LoadCursorA(nullptr, (LPCSTR)IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.lpszClassName = CLASS_NAME;
+
+    static bool registered = false;
+    if (!registered) {
+        if (!RegisterClassExA(&wc)) return 0;
+        registered = true;
+    }
+
+    // Run initial search
+    AppIDSearchState state;
+    if (!auto_search_name.empty()) {
+        state.results = steam_store_search(auto_search_name);
+    }
+
+    int win_w = 520;
+    int win_h = 370;
+    int screen_w = GetSystemMetrics(SM_CXSCREEN);
+    int screen_h = GetSystemMetrics(SM_CYSCREEN);
+    int x = (screen_w - win_w) / 2;
+    int y = (screen_h - win_h) / 2;
+
+    HWND hwnd = CreateWindowExA(
+        0, CLASS_NAME, "Goldberg Emulator - AppID Selection",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+        x, y, win_w, win_h,
+        nullptr, nullptr, GetModuleHandleA(nullptr), &state
+    );
+
+    if (!hwnd) {
+        cleanup_thumbnails(&state);
+        return 0;
+    }
+
+    SendMessageA(state.hwnd_search_edit, WM_SETTEXT, 0, (LPARAM)auto_search_name.c_str());
+
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+
+    // Modal message loop
+    MSG msg = {};
+    while (IsWindow(hwnd) && GetMessageA(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageA(&msg);
+    }
+
+    // Drain remaining WM_APP (thumbnail) messages to free memory
+    while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        if (msg.message == WM_APP) {
+            delete (ThumbnailData*)msg.wParam;
+        }
+    }
+
+    return state.result_appid;
+}
+
+
+// ============================================================
 // Fetch SteamDB RSS -> latest build_id
 // ============================================================
 
@@ -241,7 +838,14 @@ static nlohmann::json fetch_schema_lang(const std::string &api_key, uint32 appid
 bool Steam_User_Stats::run_first_time_setup()
 {
     uint32 appid = settings->get_local_game_id().AppID();
-    if (!appid) return false;
+    if (!appid) {
+        std::string search_name = derive_search_name();
+        appid = run_appid_dialog(search_name);
+        if (!appid) return false;
+
+        settings->set_game_id(CGameID(appid));
+        local_storage->setAppId(appid);
+    }
 
     const char *game_name = settings->get_local_name();
     if (!game_name || !*game_name) game_name = "Unknown Game";
