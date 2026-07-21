@@ -245,6 +245,15 @@ static std::vector<SteamSearchResult> steam_store_search(const std::string &term
         }
     } catch (...) {}
 
+    // Fallback: If no results found and term contains spaces, try searching without spaces
+    if (results.empty() && term.find(' ') != std::string::npos) {
+        std::string unspaced = term;
+        unspaced.erase(std::remove(unspaced.begin(), unspaced.end(), ' '), unspaced.end());
+        if (!unspaced.empty()) {
+            return steam_store_search(unspaced);
+        }
+    }
+
     return results;
 }
 
@@ -512,56 +521,67 @@ static LRESULT CALLBACK AppIDDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
 
         // Row 1: "Search Steam:" label + edit + Search button
-        // Window client width = win_w - borders (~8px) ≈ 552px for a 560px window.
-        // Layout: [12][label:80][4][edit:360][4][btn:76][12] = 548
-        CreateWindowExA(0, "STATIC", "Search Steam:",
-            WS_CHILD | WS_VISIBLE, 12, 12, 80, 22,
+        HWND hwnd_lbl1 = CreateWindowExA(0, "STATIC", "Search Steam:",
+            WS_CHILD | WS_VISIBLE, 12, 14, 84, 18,
             hwnd, nullptr, nullptr, nullptr);
+        SendMessageA(hwnd_lbl1, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         state->hwnd_search_edit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            96, 10, 360, 24, hwnd, nullptr, nullptr, nullptr);
+            100, 10, 356, 24, hwnd, nullptr, nullptr, nullptr);
         SendMessageA(state->hwnd_search_edit, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         state->hwnd_search_btn = CreateWindowExA(0, "BUTTON", "Search",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            460, 10, 76, 24, hwnd, (HMENU)100, nullptr, nullptr);
+            462, 10, 80, 24, hwnd, (HMENU)100, nullptr, nullptr);
         SendMessageA(state->hwnd_search_btn, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         // Status bar
         state->hwnd_status = CreateWindowExA(0, "STATIC",
             "Enter a game name and press Search, or wait for the auto-detected search.",
-            WS_CHILD | WS_VISIBLE, 12, 40, 524, 18,
+            WS_CHILD | WS_VISIBLE, 12, 40, 530, 18,
             hwnd, nullptr, nullptr, nullptr);
         SendMessageA(state->hwnd_status, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         // Listbox (owner-drawn with thumbnails)
-        // Height: window client - top controls (62) - bottom bar (40) - margins = 252
         state->hwnd_list = CreateWindowExA(WS_EX_CLIENTEDGE, "LISTBOX", "",
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP |
             LBS_OWNERDRAWVARIABLE | LBS_HASSTRINGS | LBS_NOTIFY,
-            12, 62, 524, 252, hwnd, (HMENU)200, nullptr, nullptr);
+            12, 62, 530, 216, hwnd, (HMENU)200, nullptr, nullptr);
         SendMessageA(state->hwnd_list, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         // Bottom bar: "Or enter AppID manually:" + edit + Select + Cancel
-        // y = 62 + 252 + 4 = 318
-        CreateWindowExA(0, "STATIC", "Or enter AppID manually:",
-            WS_CHILD | WS_VISIBLE, 12, 322, 148, 22,
+        HWND hwnd_lbl2 = CreateWindowExA(0, "STATIC", "Or enter AppID manually:",
+            WS_CHILD | WS_VISIBLE, 12, 290, 150, 18,
             hwnd, nullptr, nullptr, nullptr);
+        SendMessageA(hwnd_lbl2, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         state->hwnd_manual_edit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
             WS_CHILD | WS_VISIBLE | ES_NUMBER | ES_AUTOHSCROLL,
-            164, 320, 100, 24, hwnd, nullptr, nullptr, nullptr);
+            166, 286, 90, 24, hwnd, nullptr, nullptr, nullptr);
         SendMessageA(state->hwnd_manual_edit, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         state->hwnd_select_btn = CreateWindowExA(0, "BUTTON", "Select",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_DEFPUSHBUTTON,
-            280, 320, 80, 26, hwnd, (HMENU)101, nullptr, nullptr);
+            262, 286, 80, 26, hwnd, (HMENU)101, nullptr, nullptr);
         SendMessageA(state->hwnd_select_btn, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-        CreateWindowExA(0, "BUTTON", "Cancel",
+        HWND hwnd_cancel = CreateWindowExA(0, "BUTTON", "Cancel",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            368, 320, 80, 26, hwnd, (HMENU)102, nullptr, nullptr);
+            348, 286, 80, 26, hwnd, (HMENU)102, nullptr, nullptr);
+        SendMessageA(hwnd_cancel, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        // Target DLL path row
+        HWND hwnd_lbl3 = CreateWindowExA(0, "STATIC", "DLL Path:",
+            WS_CHILD | WS_VISIBLE, 12, 326, 65, 18,
+            hwnd, nullptr, nullptr, nullptr);
+        SendMessageA(hwnd_lbl3, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        std::string dll_filepath = get_dll_filepath();
+        HWND hwnd_target = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", dll_filepath.c_str(),
+            WS_CHILD | WS_VISIBLE | ES_READONLY | ES_AUTOHSCROLL,
+            80, 322, 462, 24, hwnd, nullptr, nullptr, nullptr);
+        SendMessageA(hwnd_target, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         // Pre-populate if results exist (shouldn't happen now that search is async)
         if (!state->results.empty()) {
@@ -797,10 +817,12 @@ static uint32 run_appid_dialog(const std::string &auto_search_name)
         if (!RegisterClassExA(&wc)) return 0;
     }
 
-    AppIDSearchState state;
+    DWORD dwStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    RECT rcWin = { 0, 0, 554, 356 };
+    AdjustWindowRectEx(&rcWin, dwStyle, FALSE, 0);
+    int win_w = rcWin.right - rcWin.left;
+    int win_h = rcWin.bottom - rcWin.top;
 
-    int win_w = 560;
-    int win_h = 390;
     int screen_w = GetSystemMetrics(SM_CXSCREEN);
     int screen_h = GetSystemMetrics(SM_CYSCREEN);
     int x = (screen_w - win_w) / 2;
@@ -808,7 +830,7 @@ static uint32 run_appid_dialog(const std::string &auto_search_name)
 
     HWND hwnd = CreateWindowExA(
         0, CLASS_NAME, "Goldberg Emulator - AppID Selection",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+        dwStyle,
         x, y, win_w, win_h,
         nullptr, nullptr, GetModuleHandleA(nullptr), &state
     );
@@ -903,6 +925,19 @@ static nlohmann::json fetch_schema_lang(const std::string &api_key, uint32 appid
 }
 
 
+static std::string get_dll_filepath()
+{
+    char buf[MAX_PATH] = {};
+    HMODULE hMod = nullptr;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       (LPCSTR)&fetch_latest_build, &hMod);
+    if (hMod && GetModuleFileNameA(hMod, buf, sizeof(buf))) {
+        return buf;
+    }
+    return Local_Storage::get_program_path();
+}
+
 // ============================================================
 // MAIN: run_first_time_setup()
 // ============================================================
@@ -910,8 +945,8 @@ static nlohmann::json fetch_schema_lang(const std::string &api_key, uint32 appid
 bool Steam_User_Stats::run_first_time_setup()
 {
     uint32 appid = settings->get_local_game_id().AppID();
+    std::string search_name = derive_search_name();
     if (!appid) {
-        std::string search_name = derive_search_name();
         appid = run_appid_dialog(search_name);
         if (!appid) return false;
 
@@ -919,16 +954,16 @@ bool Steam_User_Stats::run_first_time_setup()
         local_storage->setAppId(appid);
     }
 
-    const char *game_name = settings->get_local_name();
-    if (!game_name || !*game_name) game_name = "Unknown Game";
-
+    std::string game_name = search_name.empty() ? "Unknown Game" : search_name;
     std::string settings_path = Local_Storage::get_game_settings_path();
+    std::string dll_path = get_dll_filepath();
 
     // --- Open console ---
     console_open("Goldberg Emulator - Auto Setup");
     printf("=== Goldberg Emulator - Auto Setup ===\n\n");
-    printf("Game:  \033[1m%s\033[0m\n", game_name);
-    printf("AppID: %u\n\n", appid);
+    printf("Game:     \033[1m%s\033[0m\n", game_name.c_str());
+    printf("AppID:    %u\n", appid);
+    printf("DLL Path: %s\n\n", dll_path.c_str());
 
     // --- Prompt to start ---
     printf("Will generate steam_settings files for this game.\n");
