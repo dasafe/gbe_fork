@@ -147,100 +147,6 @@ static std::string extract_filename(const std::string &url)
 }
 
 
-// Map Steam store display names to language codes
-static const std::map<std::string, std::string> STEAM_LANG_MAP = {
-    {"english",                  "english"},
-    {"french",                   "french"},
-    {"italian",                  "italian"},
-    {"german",                   "german"},
-    {"spanish - spain",          "spanish"},
-    {"spanish",                  "spanish"},
-    {"japanese",                 "japanese"},
-    {"korean",                   "korean"},
-    {"portuguese - portugal",    "portuguese"},
-    {"portuguese",               "portuguese"},
-    {"russian",                  "russian"},
-    {"simplified chinese",       "schinese"},
-    {"traditional chinese",      "tchinese"},
-    {"polish",                   "polish"},
-    {"dutch",                    "dutch"},
-    {"turkish",                  "turkish"},
-    {"czech",                    "czech"},
-    {"swedish",                  "swedish"},
-    {"portuguese - brazil",      "brazilian"},
-    {"thai",                     "thai"},
-    {"vietnamese",               "vietnamese"},
-    {"arabic",                   "arabic"},
-    {"ukrainian",                "ukrainian"},
-    {"spanish - latin america",  "latam"},
-    {"latin american spanish",   "latam"},
-};
-
-static std::string strip_html(const std::string &s)
-{
-    std::string out;
-    bool in_tag = false;
-    for (char c : s) {
-        if (c == '<') { in_tag = true; continue; }
-        if (c == '>') { in_tag = false; continue; }
-        if (!in_tag) out.push_back(c);
-    }
-    return out;
-}
-
-static std::vector<std::string> fetch_supported_languages(uint32 appid)
-{
-    std::string url = "https://store.steampowered.com/api/appdetails?appids=" + std::to_string(appid);
-    std::string resp = http_get(url, 15L);
-    if (resp.empty()) return {};
-
-    try {
-        auto j = nlohmann::json::parse(resp);
-        auto &data = j[std::to_string(appid)]["data"];
-        if (data.is_null() || !data["supported_languages"].is_string()) return {};
-
-        std::string raw = data["supported_languages"].get<std::string>();
-        raw = strip_html(raw);
-
-        std::vector<std::string> codes;
-        size_t start = 0, end;
-        while ((end = raw.find(',', start)) != std::string::npos) {
-            std::string token = raw.substr(start, end - start);
-            // trim
-            auto first = token.find_first_not_of(" \t\r\n");
-            auto last = token.find_last_not_of(" \t\r\n");
-            if (first != std::string::npos) {
-                token = token.substr(first, last - first + 1);
-            }
-            // lowercase for lookup
-            std::string lower = common_helpers::to_lower(token);
-            auto it = STEAM_LANG_MAP.find(lower);
-            if (it != STEAM_LANG_MAP.end() && it->second != "english") {
-                codes.push_back(it->second);
-            }
-            start = end + 1;
-        }
-        // last token
-        if (start < raw.size()) {
-            std::string token = raw.substr(start);
-            auto first = token.find_first_not_of(" \t\r\n");
-            auto last = token.find_last_not_of(" \t\r\n");
-            if (first != std::string::npos) {
-                token = token.substr(first, last - first + 1);
-            }
-            std::string lower = common_helpers::to_lower(token);
-            auto it = STEAM_LANG_MAP.find(lower);
-            if (it != STEAM_LANG_MAP.end() && it->second != "english") {
-                codes.push_back(it->second);
-            }
-        }
-
-        return codes;
-    } catch (...) {
-        return {};
-    }
-}
-
 
 // ============================================================
 // Progress printing helpers
@@ -379,46 +285,9 @@ bool Steam_User_Stats::run_first_time_setup()
     }
 
     // ============================================================
-    // STEP 1: Fetch supported languages from store API
+    // STEP 1: Fetch latest build from SteamDB
     // ============================================================
-    printf("Step 1/6: Fetching supported languages...\n");
-    fflush(stdout);
-
-    std::vector<std::string> supported_langs = fetch_supported_languages(appid);
-    if (supported_langs.empty()) {
-        print_info("Could not fetch from store API, will check all common languages");
-        // Fallback: use all non-english common languages
-        for (const auto &[name, code] : STEAM_LANG_MAP) {
-            if (code != "english" &&
-                std::find(supported_langs.begin(), supported_langs.end(), code) == supported_langs.end()) {
-                supported_langs.push_back(code);
-            }
-        }
-    }
-    // Deduplicate and remove english from the translation list
-    {
-        std::set<std::string> dedup;
-        for (auto &l : supported_langs) dedup.insert(l);
-        supported_langs.assign(dedup.begin(), dedup.end());
-        auto it = std::find(supported_langs.begin(), supported_langs.end(), "english");
-        if (it != supported_langs.end()) supported_langs.erase(it);
-    }
-
-    // Build the full list including english for supported_languages.txt
-    std::vector<std::string> all_langs = supported_langs;
-    {
-        std::set<std::string> dedup;
-        dedup.insert("english");
-        for (auto &l : all_langs) dedup.insert(l);
-        all_langs.assign(dedup.begin(), dedup.end());
-    }
-
-    print_ok("%zu supported languages (%zu + english)", all_langs.size(), supported_langs.size());
-
-    // ============================================================
-    // STEP 2: Fetch latest build from SteamDB
-    // ============================================================
-    printf("\nStep 2/6: Fetching latest build info...\n");
+    printf("Step 1/5: Fetching latest build info...\n");
     fflush(stdout);
 
     uint32 latest_build = fetch_latest_build(appid);
@@ -429,9 +298,9 @@ bool Steam_User_Stats::run_first_time_setup()
     }
 
     // ============================================================
-    // STEP 3: Fetch English schema
+    // STEP 2: Fetch English schema
     // ============================================================
-    printf("\nStep 3/6: Fetching achievement schema (English)...\n");
+    printf("\nStep 2/5: Fetching achievement schema (English)...\n");
     fflush(stdout);
 
     nlohmann::json schema_en = fetch_schema_lang(api_key, appid, "english");
@@ -463,9 +332,9 @@ bool Steam_User_Stats::run_first_time_setup()
     }
 
     // ============================================================
-    // STEP 4: Fetch translations (additional languages)
+    // STEP 3: Try Spanish translations (only if game has them)
     // ============================================================
-    printf("\nStep 4/6: Fetching translations...\n");
+    printf("\nStep 3/5: Fetching Spanish translations...\n");
     fflush(stdout);
 
     // Build a map: achievement name -> { displayName: {lang->str}, description: {lang->str} }
@@ -486,59 +355,51 @@ bool Steam_User_Stats::run_first_time_setup()
         }
     }
 
-    if (!ach_translations.empty() && !supported_langs.empty()) {
-        // Only fetch translations for the languages the game supports
-        for (const auto &code : supported_langs) {
-            // Look up a human-readable label for the progress line
-            auto label_it = std::find_if(STEAM_LANG_MAP.begin(), STEAM_LANG_MAP.end(),
-                [&](const auto &pair) { return pair.second == code; });
-            const char *label = (label_it != STEAM_LANG_MAP.end()) ? label_it->first.c_str() : code.c_str();
+    bool has_spanish = false;
+    if (!ach_translations.empty()) {
+        print_info("Fetching Spanish...");
+        fflush(stdout);
 
-            print_info("Fetching %s...", label);
-            fflush(stdout);
+        nlohmann::json schema_es = fetch_schema_lang(api_key, appid, "spanish");
+        if (!schema_es.is_null()) {
+            auto achs_es = schema_es["game"]["availableGameStats"]["achievements"];
+            if (achs_es.is_array()) {
+                int merged = 0;
+                for (const auto &ach : achs_es) {
+                    std::string name = ach.value("name", std::string{});
+                    if (name.empty()) continue;
 
-            nlohmann::json schema_lang = fetch_schema_lang(api_key, appid, code);
-            if (schema_lang.is_null()) {
-                print_info("  (skipped — no response)");
-                continue;
-            }
+                    auto it = ach_translations.find(name);
+                    if (it == ach_translations.end()) continue;
 
-            auto achs_lang = schema_lang["game"]["availableGameStats"]["achievements"];
-            if (!achs_lang.is_array()) {
-                continue;
-            }
+                    std::string dn = ach.value("displayName", std::string{});
+                    std::string desc = ach.value("description", std::string{});
 
-            int merged = 0;
-            for (const auto &ach : achs_lang) {
-                std::string name = ach.value("name", std::string{});
-                if (name.empty()) continue;
-
-                auto it = ach_translations.find(name);
-                if (it == ach_translations.end()) continue;
-
-                std::string dn = ach.value("displayName", std::string{});
-                std::string desc = ach.value("description", std::string{});
-
-                // Only add if different from English (i.e., game actually has translation)
-                if (!dn.empty() && dn != it->second["displayName"]["english"].get<std::string>()) {
-                    it->second["displayName"][code] = dn;
-                    merged++;
+                    if (!dn.empty() && dn != it->second["displayName"]["english"].get<std::string>()) {
+                        it->second["displayName"]["spanish"] = dn;
+                        merged++;
+                    }
+                    if (!desc.empty() && desc != it->second["description"]["english"].get<std::string>()) {
+                        it->second["description"]["spanish"] = desc;
+                    }
                 }
-                if (!desc.empty() && desc != it->second["description"]["english"].get<std::string>()) {
-                    it->second["description"][code] = desc;
+
+                if (merged > 0) {
+                    print_ok("  Spanish: %d translations", merged);
+                    has_spanish = true;
+                } else {
+                    print_info("  (Spanish not available — same as English)");
                 }
             }
-
-            if (merged > 0) {
-                print_ok("  %s: %d translations", label, merged);
-            }
+        } else {
+            print_info("  (skipped — no response)");
         }
     }
 
     // ============================================================
-    // STEP 5: Download icons
+    // STEP 4: Download icons
     // ============================================================
-    printf("\nStep 5/6: Downloading achievement icons...\n");
+    printf("\nStep 4/5: Downloading achievement icons...\n");
     fflush(stdout);
 
     std::string icons_dir = settings_path + "achievement_images" + PATH_SEPARATOR;
@@ -577,12 +438,12 @@ bool Steam_User_Stats::run_first_time_setup()
     }
 
     // ============================================================
-    // STEP 6: Write all files
+    // STEP 5: Write all files
     // ============================================================
-    printf("\nStep 6/6: Writing files...\n");
+    printf("\nStep 5/5: Writing files...\n");
     fflush(stdout);
 
-    // --- 6a: steam_appid.txt ---
+    // --- 5a: steam_appid.txt ---
     {
         std::string filepath = settings_path + "steam_appid.txt";
         std::ofstream fout(std::filesystem::u8path(filepath), std::ios::trunc);
@@ -594,21 +455,20 @@ bool Steam_User_Stats::run_first_time_setup()
         }
     }
 
-    // --- 6b: supported_languages.txt ---
+    // --- 5b: supported_languages.txt ---
     {
         std::string filepath = settings_path + "supported_languages.txt";
         std::ofstream fout(std::filesystem::u8path(filepath), std::ios::trunc);
         if (fout) {
-            for (const auto &lang : all_langs) {
-                fout << lang << "\n";
-            }
-            print_ok("supported_languages.txt (%zu languages)", all_langs.size());
+            fout << "english\n";
+            if (has_spanish) fout << "spanish\n";
+            print_ok("supported_languages.txt (english%s)", has_spanish ? " + spanish" : "");
         } else {
             print_fail("supported_languages.txt (write error)");
         }
     }
 
-    // --- 6c: achievements.json ---
+    // --- 5c: achievements.json ---
     {
         nlohmann::json ach_array = nlohmann::json::array();
         for (const auto &[name, entry] : ach_translations) {
@@ -662,7 +522,7 @@ bool Steam_User_Stats::run_first_time_setup()
         }
     }
 
-    // --- 6d: stats.json ---
+    // --- 5d: stats.json ---
     {
         nlohmann::json stats_array = nlohmann::json::array();
         if (stats_en.is_array()) {
@@ -708,7 +568,7 @@ bool Steam_User_Stats::run_first_time_setup()
         }
     }
 
-    // --- 6e: branches.json ---
+    // --- 5e: branches.json ---
     {
         nlohmann::json branches_array = nlohmann::json::array();
         nlohmann::json public_branch;
@@ -740,7 +600,7 @@ bool Steam_User_Stats::run_first_time_setup()
         printf("  Branch: public (build %u)\n", latest_build);
     }
     printf("  Achievements: %zu\n", ach_translations.size());
-    printf("  Languages: %zu\n", all_langs.size());
+    printf("  Languages: %s\n", has_spanish ? "english, spanish" : "english");
     printf("  Icons: %d/%d\n\n", icons_downloaded, icons_total);
     printf("\033[1;33mREADY TO PLAY\033[0m\n");
     printf("Press ENTER to start the game...\n");
