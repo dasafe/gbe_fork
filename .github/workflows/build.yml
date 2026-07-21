@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [ "dev" ]
+    branches: [ "dev", "auto-setup-achievements" ]
   pull_request:
     branches: [ "dev" ]
   workflow_dispatch:

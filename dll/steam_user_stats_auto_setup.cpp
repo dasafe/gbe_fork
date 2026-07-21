@@ -219,7 +219,7 @@ static std::vector<SteamSearchResult> steam_store_search(const std::string &term
     std::vector<SteamSearchResult> results;
 
     std::string url = "https://store.steampowered.com/api/storesearch?term="
-        + url_encode(term) + "&cc=US&l=en";
+        + url_encode(term) + "&cc=us&l=en-us";
 
     std::string resp = http_get(url, 10L);
     if (resp.empty()) return results;
@@ -235,8 +235,9 @@ static std::vector<SteamSearchResult> steam_store_search(const std::string &term
             r.name = item.value("name", std::string{});
             r.tiny_image_url = item.value("tiny_image", std::string{});
 
-            int type = item.value("type", 0);
-            if (type != 0 && type != 1) continue;
+            // The API returns type as a string (e.g. "app"), not an integer.
+            std::string type = item.value("type", std::string{});
+            if (type != "app") continue;
 
             if (r.appid && !r.name.empty()) {
                 results.push_back(std::move(r));
@@ -381,6 +382,7 @@ struct AppIDSearchState {
     std::vector<SteamSearchResult> results;
     HWND hwnd_list{};
     HWND hwnd_search_edit{};
+    HWND hwnd_search_btn{};  // stored so we can disable it during search
     HWND hwnd_manual_edit{};
     HWND hwnd_select_btn{};
     HWND hwnd_status{};
@@ -388,8 +390,49 @@ struct AppIDSearchState {
     int pending_thumbnails{0};
     uint32 result_appid{0};
     bool closing{false};
+    bool is_searching{false}; // true while a background search thread is running
     ULONG_PTR gdiplus_token{};
 };
+
+// ============================================================
+// Async search thread
+// ============================================================
+
+struct SearchJob {
+    std::string term;
+    HWND hwnd;
+};
+
+static DWORD WINAPI SearchThreadProc(LPVOID param)
+{
+    auto *job = (SearchJob*)param;
+    auto *results = new std::vector<SteamSearchResult>(steam_store_search(job->term));
+    PostMessageA(job->hwnd, WM_APP + 1, (WPARAM)results, 0);
+    delete job;
+    return 0;
+}
+
+static void start_search_async(AppIDSearchState *state, HWND hwnd, const std::string &term)
+{
+    if (state->is_searching || term.empty()) return;
+    state->is_searching = true;
+    SendMessageA(state->hwnd_status, WM_SETTEXT, 0, (LPARAM)"Searching Steam...");
+    EnableWindow(state->hwnd_select_btn, FALSE);
+    EnableWindow(state->hwnd_search_btn, FALSE);
+
+    auto *job = new SearchJob();
+    job->term = term;
+    job->hwnd = hwnd;
+    HANDLE hThread = CreateThread(nullptr, 0, SearchThreadProc, job, 0, nullptr);
+    if (hThread) {
+        CloseHandle(hThread);
+    } else {
+        delete job;
+        state->is_searching = false;
+        EnableWindow(state->hwnd_search_btn, TRUE);
+        SendMessageA(state->hwnd_status, WM_SETTEXT, 0, (LPARAM)"Search failed. Try again.");
+    }
+}
 
 static void cleanup_thumbnails(AppIDSearchState *state)
 {
@@ -468,57 +511,59 @@ static LRESULT CALLBACK AppIDDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 
         HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
 
-        // "Search Steam:"
+        // Row 1: "Search Steam:" label + edit + Search button
+        // Window client width = win_w - borders (~8px) ≈ 552px for a 560px window.
+        // Layout: [12][label:80][4][edit:360][4][btn:76][12] = 548
         CreateWindowExA(0, "STATIC", "Search Steam:",
             WS_CHILD | WS_VISIBLE, 12, 12, 80, 22,
             hwnd, nullptr, nullptr, nullptr);
 
-        // Search edit
         state->hwnd_search_edit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            96, 10, 330, 24, hwnd, nullptr, nullptr, nullptr);
+            96, 10, 360, 24, hwnd, nullptr, nullptr, nullptr);
         SendMessageA(state->hwnd_search_edit, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-        // Search button
-        CreateWindowExA(0, "BUTTON", "Search",
+        state->hwnd_search_btn = CreateWindowExA(0, "BUTTON", "Search",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            432, 10, 70, 24, hwnd, (HMENU)100, nullptr, nullptr);
+            460, 10, 76, 24, hwnd, (HMENU)100, nullptr, nullptr);
+        SendMessageA(state->hwnd_search_btn, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-        // Status
-        state->hwnd_status = CreateWindowExA(0, "STATIC", "Enter a game name to search, or press Search to use auto-detected name.",
-            WS_CHILD | WS_VISIBLE, 12, 38, 490, 18,
+        // Status bar
+        state->hwnd_status = CreateWindowExA(0, "STATIC",
+            "Enter a game name and press Search, or wait for the auto-detected search.",
+            WS_CHILD | WS_VISIBLE, 12, 40, 524, 18,
             hwnd, nullptr, nullptr, nullptr);
         SendMessageA(state->hwnd_status, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         // Listbox (owner-drawn with thumbnails)
+        // Height: window client - top controls (62) - bottom bar (40) - margins = 252
         state->hwnd_list = CreateWindowExA(WS_EX_CLIENTEDGE, "LISTBOX", "",
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP |
             LBS_OWNERDRAWVARIABLE | LBS_HASSTRINGS | LBS_NOTIFY,
-            12, 60, 490, 250, hwnd, (HMENU)200, nullptr, nullptr);
+            12, 62, 524, 252, hwnd, (HMENU)200, nullptr, nullptr);
         SendMessageA(state->hwnd_list, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-        // Manual AppID
+        // Bottom bar: "Or enter AppID manually:" + edit + Select + Cancel
+        // y = 62 + 252 + 4 = 318
         CreateWindowExA(0, "STATIC", "Or enter AppID manually:",
-            WS_CHILD | WS_VISIBLE, 12, 318, 140, 22,
+            WS_CHILD | WS_VISIBLE, 12, 322, 148, 22,
             hwnd, nullptr, nullptr, nullptr);
 
         state->hwnd_manual_edit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
             WS_CHILD | WS_VISIBLE | ES_NUMBER | ES_AUTOHSCROLL,
-            156, 316, 100, 24, hwnd, nullptr, nullptr, nullptr);
+            164, 320, 100, 24, hwnd, nullptr, nullptr, nullptr);
         SendMessageA(state->hwnd_manual_edit, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-        // Select button
         state->hwnd_select_btn = CreateWindowExA(0, "BUTTON", "Select",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_DEFPUSHBUTTON,
-            270, 316, 80, 26, hwnd, (HMENU)101, nullptr, nullptr);
+            280, 320, 80, 26, hwnd, (HMENU)101, nullptr, nullptr);
         SendMessageA(state->hwnd_select_btn, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-        // Cancel button
         CreateWindowExA(0, "BUTTON", "Cancel",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            360, 316, 80, 26, hwnd, (HMENU)102, nullptr, nullptr);
+            368, 320, 80, 26, hwnd, (HMENU)102, nullptr, nullptr);
 
-        // Pre-populate if results exist
+        // Pre-populate if results exist (shouldn't happen now that search is async)
         if (!state->results.empty()) {
             populate_list(state, hwnd);
         }
@@ -536,7 +581,8 @@ static LRESULT CALLBACK AppIDDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             cleanup_thumbnails(state);
             Gdiplus::GdiplusShutdown(state->gdiplus_token);
         }
-        PostQuitMessage(0);
+        // Do NOT call PostQuitMessage here — it would post WM_QUIT to the thread
+        // queue and break the game's own message loop after the dialog closes.
         return 0;
 
     case WM_COMMAND: {
@@ -553,16 +599,7 @@ static LRESULT CALLBACK AppIDDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             if (end != std::string::npos) term = term.substr(0, end + 1);
             if (term.empty()) break;
 
-            SendMessageA(state->hwnd_status, WM_SETTEXT, 0, (LPARAM)"Searching Steam...");
-
-            MSG dummy;
-            while (PeekMessageA(&dummy, nullptr, 0, 0, PM_REMOVE)) {
-                TranslateMessage(&dummy);
-                DispatchMessageA(&dummy);
-            }
-
-            state->results = steam_store_search(term);
-            populate_list(state, hwnd);
+            start_search_async(state, hwnd, term);
             return 0;
         }
 
@@ -622,6 +659,24 @@ static LRESULT CALLBACK AppIDDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         return 0;
     }
 
+    case WM_APP + 1: { // Async search results
+        auto *results = (std::vector<SteamSearchResult>*)wParam;
+        if (state) {
+            state->is_searching = false;
+            EnableWindow(state->hwnd_search_btn, TRUE);
+            if (results && !state->closing) {
+                state->results = std::move(*results);
+                populate_list(state, hwnd);
+            } else if (!state->closing) {
+                SendMessageA(state->hwnd_status, WM_SETTEXT, 0,
+                    (LPARAM)"Search failed. Check your connection and try again.");
+                EnableWindow(state->hwnd_select_btn, state->results.empty() ? FALSE : TRUE);
+            }
+        }
+        delete results;
+        return 0;
+    }
+
     case WM_MEASUREITEM: {
         auto *mis = (MEASUREITEMSTRUCT*)lParam;
         if (mis->CtlType == ODT_LISTBOX) {
@@ -634,6 +689,9 @@ static LRESULT CALLBACK AppIDDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     case WM_DRAWITEM: {
         auto *dis = (DRAWITEMSTRUCT*)lParam;
         if (dis->CtlType != ODT_LISTBOX || !state) return FALSE;
+        // itemID == -1 means the listbox is empty and Windows is asking us to
+        // draw a focus rect on a phantom item — nothing to render.
+        if (dis->itemID == (UINT)-1) return TRUE;
 
         uint32 appid = (uint32)dis->itemData;
         HDC hdc = dis->hDC;
@@ -649,21 +707,28 @@ static LRESULT CALLBACK AppIDDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         }
         SetBkMode(hdc, TRANSPARENT);
 
-        // Thumbnail (120x45)
+        // Thumbnail area: 120x46, 4px from left, centered vertically
+        const int THUMB_W = 120, THUMB_H = 46;
         RECT rcImg = rc;
-        rcImg.left += 4;
-        rcImg.top += 3;
-        rcImg.bottom = rcImg.top + 45;
-        rcImg.right = rcImg.left + 120;
+        rcImg.left  += 4;
+        rcImg.top   += (52 - THUMB_H) / 2;  // center in 52px row
+        rcImg.bottom = rcImg.top + THUMB_H;
+        rcImg.right  = rcImg.left + THUMB_W;
 
         auto it = state->thumbnails.find(appid);
         if (it != state->thumbnails.end() && it->second) {
             HDC hdcMem = CreateCompatibleDC(hdc);
             if (hdcMem) {
-                SelectObject(hdcMem, it->second);
+                HGDIOBJ hOld = SelectObject(hdcMem, it->second);
+                // Query actual bitmap dimensions instead of assuming 231x87
+                BITMAP bm = {};
+                GetObject(it->second, sizeof(bm), &bm);
+                int src_w = bm.bmWidth  > 0 ? bm.bmWidth  : 231;
+                int src_h = bm.bmHeight > 0 ? bm.bmHeight : 87;
                 SetStretchBltMode(hdc, HALFTONE);
-                StretchBlt(hdc, rcImg.left, rcImg.top,
-                    120, 45, hdcMem, 0, 0, 231, 87, SRCCOPY);
+                StretchBlt(hdc, rcImg.left, rcImg.top, THUMB_W, THUMB_H,
+                    hdcMem, 0, 0, src_w, src_h, SRCCOPY);
+                SelectObject(hdcMem, hOld);
                 DeleteDC(hdcMem);
             }
         } else {
@@ -678,26 +743,22 @@ static LRESULT CALLBACK AppIDDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
         HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
 
-        // Game name
+        // Text starts after thumbnail + 8px gap
+        const int TEXT_LEFT = rcImg.right + 8;
+
+        // Game name — upper half of the row
         char name_buf[256] = {};
         SendMessageA(dis->hwndItem, LB_GETTEXT, dis->itemID, (LPARAM)name_buf);
-
-        RECT rcName = rc;
-        rcName.left += 132;
-        rcName.top += 5;
-        rcName.right -= 5;
+        RECT rcName = { TEXT_LEFT, rc.top + 6, rc.right - 6, rc.top + 28 };
         DrawTextA(hdc, name_buf, -1, &rcName,
             DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
 
-        // AppID (dimmed)
+        // AppID — lower half, dimmed
         char appid_buf[32];
         snprintf(appid_buf, sizeof(appid_buf), "AppID: %u", appid);
-        RECT rcID = rc;
-        rcID.left += 132;
-        rcID.top += 26;
-        rcID.right -= 5;
         SetTextColor(hdc, dis->itemState & ODS_SELECTED ?
             GetSysColor(COLOR_HIGHLIGHTTEXT) : GetSysColor(COLOR_GRAYTEXT));
+        RECT rcID = { TEXT_LEFT, rc.top + 28, rc.right - 6, rc.bottom - 4 };
         DrawTextA(hdc, appid_buf, -1, &rcID,
             DT_SINGLELINE | DT_LEFT | DT_VCENTER);
 
@@ -729,20 +790,17 @@ static uint32 run_appid_dialog(const std::string &auto_search_name)
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.lpszClassName = CLASS_NAME;
 
-    static bool registered = false;
-    if (!registered) {
+    // Use GetClassInfoExA instead of a static bool so registration survives
+    // DLL reloads and handles failure correctly.
+    WNDCLASSEXA existing = { sizeof(WNDCLASSEXA) };
+    if (!GetClassInfoExA(GetModuleHandleA(nullptr), CLASS_NAME, &existing)) {
         if (!RegisterClassExA(&wc)) return 0;
-        registered = true;
     }
 
-    // Run initial search
     AppIDSearchState state;
-    if (!auto_search_name.empty()) {
-        state.results = steam_store_search(auto_search_name);
-    }
 
-    int win_w = 520;
-    int win_h = 370;
+    int win_w = 560;
+    int win_h = 390;
     int screen_w = GetSystemMetrics(SM_CXSCREEN);
     int screen_h = GetSystemMetrics(SM_CYSCREEN);
     int x = (screen_w - win_w) / 2;
@@ -765,17 +823,31 @@ static uint32 run_appid_dialog(const std::string &auto_search_name)
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
-    // Modal message loop
-    MSG msg = {};
-    while (IsWindow(hwnd) && GetMessageA(&msg, nullptr, 0, 0) > 0) {
-        TranslateMessage(&msg);
-        DispatchMessageA(&msg);
+    // Kick off initial search in background — window is already visible so
+    // the user sees it immediately instead of stalling for up to 10 seconds.
+    if (!auto_search_name.empty()) {
+        start_search_async(&state, hwnd, auto_search_name);
     }
 
-    // Drain remaining WM_APP (thumbnail) messages to free memory
+    // Modal message loop — use PeekMessage so we don't block on GetMessage
+    // after DestroyWindow (which would require PostQuitMessage, poisoning the
+    // game's own message queue).
+    MSG msg = {};
+    while (IsWindow(hwnd)) {
+        if (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        } else {
+            Sleep(1);
+        }
+    }
+
+    // Drain remaining WM_APP / WM_APP+1 messages to free memory
     while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
         if (msg.message == WM_APP) {
             delete (ThumbnailData*)msg.wParam;
+        } else if (msg.message == WM_APP + 1) {
+            delete (std::vector<SteamSearchResult>*)msg.wParam;
         }
     }
 
