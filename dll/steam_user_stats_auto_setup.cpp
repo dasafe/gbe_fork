@@ -57,24 +57,6 @@ static void console_clear()
     fflush(stdout);
 }
 
-// Read a single key (Y/N), returns 'Y' or 'N'
-static char console_ask_yn()
-{
-    for (;;) {
-        int ch = _getch();
-        if (ch == 'Y' || ch == 'y') {
-            printf("Y\n");
-            fflush(stdout);
-            return 'Y';
-        }
-        if (ch == 'N' || ch == 'n') {
-            printf("N\n");
-            fflush(stdout);
-            return 'N';
-        }
-    }
-}
-
 // Wait for Enter key
 static void console_wait_enter()
 {
@@ -298,19 +280,12 @@ bool Steam_User_Stats::run_first_time_setup()
     printf("Game:  \033[1m%s\033[0m\n", game_name);
     printf("AppID: %u\n\n", appid);
 
-    // --- Ask Y/N ---
-    printf("Generate steam_settings files for this game? (Y/N): ");
+    // --- Prompt to start ---
+    printf("Will generate steam_settings files for this game.\n");
+    printf("Press ENTER to start");
     fflush(stdout);
-
-    if (console_ask_yn() == 'N') {
-        printf("\nSkipping. You can enable this again in configs.main.ini.\n");
-        printf("\nPress ENTER to continue...\n");
-        console_wait_enter();
-        console_close();
-        return false;
-    }
-
-    printf("\n");
+    console_wait_enter();
+    printf("\n\n");
 
     // --- Check API key ---
     std::string api_key = settings->steam_api_key;
