@@ -148,7 +148,6 @@ static std::string extract_filename(const std::string &url)
 }
 
 
-
 // ============================================================
 // Progress printing helpers
 // ============================================================
@@ -500,6 +499,9 @@ static void populate_list(AppIDSearchState *state, HWND hwnd)
         char buf[64];
         snprintf(buf, sizeof(buf), "Found %zu result(s). Double-click or press Select.", state->results.size());
         SendMessageA(state->hwnd_status, WM_SETTEXT, 0, (LPARAM)buf);
+    }
+}
+
 static std::string get_dll_filepath()
 {
     char buf[MAX_PATH] = {};
@@ -809,6 +811,8 @@ static LRESULT CALLBACK AppIDDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 
 static uint32 run_appid_dialog(const std::string &auto_search_name)
 {
+    AppIDSearchState state;
+
     const char *CLASS_NAME = "GoldbergAppIDSearch";
 
     WNDCLASSEXA wc = {};
@@ -933,19 +937,6 @@ static nlohmann::json fetch_schema_lang(const std::string &api_key, uint32 appid
     }
 }
 
-
-static std::string get_dll_filepath()
-{
-    char buf[MAX_PATH] = {};
-    HMODULE hMod = nullptr;
-    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       (LPCSTR)&fetch_latest_build, &hMod);
-    if (hMod && GetModuleFileNameA(hMod, buf, sizeof(buf))) {
-        return buf;
-    }
-    return Local_Storage::get_program_path();
-}
 
 // ============================================================
 // MAIN: run_first_time_setup()
