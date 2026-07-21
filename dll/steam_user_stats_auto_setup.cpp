@@ -357,7 +357,7 @@ struct ThumbnailJob {
 
 struct ThumbnailData {
     uint32 appid;
-    std::string data;
+    std::vector<char> data;
 };
 
 static DWORD WINAPI ThumbnailDownloadProc(LPVOID param)
