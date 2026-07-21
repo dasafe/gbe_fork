@@ -4223,7 +4223,6 @@ void Steam_Overlay::render_pinned_screenshot()
         char wnd_id[64];
         snprintf(wnd_id, sizeof(wnd_id), translationPinnedScreenshots[current_language],
                  (unsigned long long)pin.id);
-                 (unsigned long long)pin.id);
 
         // Position (deferred until first manual move)
         bool first_frame = !pin.pos_set;
