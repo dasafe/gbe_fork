@@ -51,71 +51,7 @@ Steam_User_Stats::Steam_User_Stats(Settings *settings, class Networking *network
 {
     load_achievements_db(); // steam_settings/achievements.json
     load_achievements(); // %appdata%/<emu saves folder>/<app id>/achievements.json
-
-    // discard achievements without a "name"
-    auto x = defined_achievements.begin();
-    while (x != defined_achievements.end()) {
-        if (!x->contains("name")) {
-            x = defined_achievements.erase(x);
-        } else {
-            ++x;
-        }
-    }
-
-    for (auto & it : defined_achievements) {
-        try {
-            std::string name = static_cast<std::string const&>(it["name"]);
-            sorted_achievement_names.push_back(name);
-
-            achievement_trigger trig{};
-            try {
-                trig.name = name;
-                trig.value_operation = static_cast<std::string const&>(it["progress"]["value"]["operation"]);
-                std::string stat_name = common_helpers::to_lower(static_cast<std::string const&>(it["progress"]["value"]["operand1"]));
-                const auto &min_val_obj = it["progress"]["min_val"];
-                std::string min_val = min_val_obj.is_number()
-                    ? std::to_string(static_cast<double>(min_val_obj))
-                    : static_cast<std::string const&>(min_val_obj);
-                const auto &max_val_obj = it["progress"]["max_val"];
-                std::string max_val = max_val_obj.is_number()
-                    ? std::to_string(static_cast<double>(max_val_obj))
-                    : static_cast<std::string const&>(max_val_obj);
-                trig.min_value = min_val;
-                trig.max_value = max_val;
-                achievement_stat_trigger[stat_name].push_back(trig);
-            } catch(...) {}
-            
-            // default initial values, will only be added if they don't exist already
-            auto &user_ach = user_achievements[name]; // this will create a new json entry if the key didn't exist already
-            user_ach.emplace("earned", false);
-            user_ach.emplace("earned_time", static_cast<uint32>(0));
-            // they will throw an exception for achievements with no progress
-            try {
-                uint32 progress_min = std::stoul(trig.min_value);
-                uint32 progress_max = std::stoul(trig.max_value);
-                // if the above lines didn't throw exception then add the values
-                user_ach.emplace("progress", progress_min);
-                user_ach.emplace("max_progress", progress_max);
-            } catch(...) {}
-        } catch(...) {}
-
-        try {
-            it["hidden"] = std::to_string(it["hidden"].get<int>());
-        } catch(...) {}
-
-        it["displayName"] = get_value_for_language(it, "displayName", settings->get_language());
-        it["description"] = get_value_for_language(it, "description", settings->get_language());
-
-        it["icon_handle"] = Settings::UNLOADED_IMAGE_HANDLE;
-        it["icon_gray_handle"] = Settings::UNLOADED_IMAGE_HANDLE;
-    }
-
-    //TODO: not sure if the sort is actually case insensitive, ach names seem to be treated by steam as case insensitive so I assume they are.
-    //need to find a game with achievements of different case names to confirm
-    std::sort(sorted_achievement_names.begin(), sorted_achievement_names.end(), [](const std::string lhs, const std::string rhs){
-        const auto result = std::mismatch(lhs.cbegin(), lhs.cend(), rhs.cbegin(), rhs.cend(), [](const unsigned char lhs, const unsigned char rhs){return std::tolower(lhs) == std::tolower(rhs);});
-        return result.second != rhs.cend() && (result.first == lhs.cend() || std::tolower(*result.first) < std::tolower(*result.second));}
-    );
+    process_achievement_definitions();
     
     // Auto-fetch global achievement percentages from Steam API
     // Requires disable_lan_only=true in config to bypass LAN-only Winsock hook
@@ -126,6 +62,22 @@ Steam_User_Stats::Steam_User_Stats(Settings *settings, class Networking *network
     // Check for game updates via SteamDB RSS
     if (!settings->disable_networking && settings_disable_lan_only() && settings->check_for_game_updates) {
         update_check_thread = std::thread(&Steam_User_Stats::fetch_and_check_game_update, this);
+    }
+
+    // First-time setup: show console, generate steam_settings files
+    if (!settings->disable_networking && settings_disable_lan_only() &&
+        settings->first_run_auto_setup && defined_achievements.empty())
+    {
+        if (run_first_time_setup()) {
+            // Reload from newly written files
+            defined_achievements = nlohmann::json::object();
+            user_achievements = nlohmann::json::object();
+            sorted_achievement_names.clear();
+            achievement_stat_trigger.clear();
+            load_achievements_db();
+            load_achievements();
+            process_achievement_definitions();
+        }
     }
 
     if (!settings->disable_sharing_stats_with_gameserver) {

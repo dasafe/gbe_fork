@@ -413,6 +413,11 @@ public:
     // game update check via SteamDB RSS
     bool check_for_game_updates = false;
 
+    // Steam Web API key for automatic achievement setup
+    std::string steam_api_key{};
+    // automatically fetch and install achievement definitions on first run
+    bool first_run_auto_setup = false;
+
     // set by Steam_User_Stats fetch thread, read by overlay
     bool pending_update_available = false;
     uint32 pending_update_latest_build = 0;

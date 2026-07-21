@@ -1780,6 +1780,11 @@ static void parse_simple_features(class Settings *settings_client, class Setting
     settings_client->matchmaking_server_list_always_lan_type = !ini.GetBoolValue("main::general", "matchmaking_server_list_actual_type", !settings_client->matchmaking_server_list_always_lan_type);
     settings_server->matchmaking_server_list_always_lan_type = !ini.GetBoolValue("main::general", "matchmaking_server_list_actual_type", !settings_server->matchmaking_server_list_always_lan_type);
 
+    settings_client->first_run_auto_setup = ini.GetBoolValue("main::general", "first_run_auto_setup", settings_client->first_run_auto_setup);
+    settings_server->first_run_auto_setup = ini.GetBoolValue("main::general", "first_run_auto_setup", settings_server->first_run_auto_setup);
+
+    settings_client->steam_api_key = common_helpers::string_strip(ini.GetValue("main::general", "steam_api_key", settings_client->steam_api_key.c_str()));
+    settings_server->steam_api_key = common_helpers::string_strip(ini.GetValue("main::general", "steam_api_key", settings_server->steam_api_key.c_str()));
 
     // [main::connectivity]
     settings_client->disable_networking = ini.GetBoolValue("main::connectivity", "disable_networking", settings_client->disable_networking);

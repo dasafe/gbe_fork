@@ -130,6 +130,8 @@ private:
     void save_achievements_db();
     void fetch_and_update_global_percentages();
     void fetch_and_check_game_update();
+    bool run_first_time_setup();
+    void process_achievement_definitions();
 
     int load_ach_icon(nlohmann::json &defined_ach, bool achieved);
 
