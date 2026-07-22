@@ -24,6 +24,7 @@
 #include <conio.h> // _getch
 #include <cstdarg> // va_list, va_start, va_end
 #include <gdiplus.h>
+#include <regex>
 
 
 // ============================================================
@@ -198,93 +199,101 @@ static void print_info(const char *fmt, ...)
 // ============================================================
 // Steam interface detection (scan DLL for version strings)
 // ============================================================
+// Matches the exact logic and patterns from tools/generate_interfaces/generate_interfaces.cpp
 
-// Interface name prefixes to search for in the DLL binary
-// Each is a prefix optionally followed by digits (like "SteamFriends023")
-static const char *interface_patterns[] = {
-    "STEAMAPPS_INTERFACE_VERSION",
-    "SteamApps",
-    "STEAMAPPLIST_INTERFACE_VERSION",
-    "STEAMAPPTICKET_INTERFACE_VERSION",
-    "SteamClient",
-    "STEAMCONTROLLER_INTERFACE_VERSION",
-    "SteamController",
-    "SteamFriends",
-    "SteamGameServerStats",
-    "SteamGameCoordinator",
-    "SteamGameServer",
-    "STEAMHTMLSURFACE_INTERFACE_VERSION_",
-    "STEAMHTTP_INTERFACE_VERSION",
-    "SteamInput",
-    "STEAMINVENTORY_INTERFACE_V",
-    "SteamMatchMakingServers",
-    "SteamMatchMaking",
-    "SteamMatchGameSearch",
-    "SteamParties",
-    "STEAMMUSIC_INTERFACE_VERSION",
-    "STEAMMUSICREMOTE_INTERFACE_VERSION",
-    "SteamNetworkingMessages",
-    "SteamNetworkingSockets",
-    "SteamNetworkingUtils",
-    "SteamNetworking",
-    "STEAMPARENTALSETTINGS_INTERFACE_VERSION",
-    "STEAMREMOTEPLAY_INTERFACE_VERSION",
-    "STEAMREMOTESTORAGE_INTERFACE_VERSION",
-    "STEAMSCREENSHOTS_INTERFACE_VERSION",
-    "STEAMTIMELINE_INTERFACE_V",
-    "STEAMUGC_INTERFACE_VERSION",
-    "SteamUser",
-    "STEAMUSERSTATS_INTERFACE_VERSION",
-    "SteamUtils",
-    "STEAMVIDEO_INTERFACE_V",
-    "STEAMUNIFIEDMESSAGES_INTERFACE_VERSION",
-    "SteamMasterServerUpdater",
+static const std::vector<std::string> interface_regex_patterns = {
+    R"(STEAMAPPS_INTERFACE_VERSION\d+)",
+    R"(SteamApps\d+)",
+    R"(STEAMAPPLIST_INTERFACE_VERSION\d+)",
+    R"(STEAMAPPTICKET_INTERFACE_VERSION\d+)",
+    R"(SteamClient\d+)",
+
+    R"(STEAMCONTROLLER_INTERFACE_VERSION)",
+    R"(SteamController\d+)",
+
+    R"(SteamFriends\d+)",
+
+    R"(SteamGameServerStats\d+)",
+    R"(SteamGameCoordinator\d+)",
+    R"(SteamGameServer\d+)",
+
+    R"(STEAMHTMLSURFACE_INTERFACE_VERSION_\d+)",
+    R"(STEAMHTTP_INTERFACE_VERSION\d+)",
+
+    R"(SteamInput\d+)",
+    R"(STEAMINVENTORY_INTERFACE_V\d+)",
+
+    R"(SteamMatchMakingServers\d+)",
+    R"(SteamMatchMaking\d+)",
+    R"(SteamMatchGameSearch\d+)",
+
+    R"(SteamParties\d+)",
+
+    R"(STEAMMUSIC_INTERFACE_VERSION\d+)",
+    R"(STEAMMUSICREMOTE_INTERFACE_VERSION\d+)",
+
+    R"(SteamNetworkingMessages\d+)",
+    R"(SteamNetworkingSockets\d+)",
+    R"(SteamNetworkingUtils\d+)",
+    R"(SteamNetworking\d+)",
+
+    R"(STEAMPARENTALSETTINGS_INTERFACE_VERSION\d+)",
+    R"(STEAMREMOTEPLAY_INTERFACE_VERSION\d+)",
+    R"(STEAMREMOTESTORAGE_INTERFACE_VERSION\d+)",
+    R"(STEAMSCREENSHOTS_INTERFACE_VERSION\d+)",
+
+    R"(STEAMTIMELINE_INTERFACE_V\d+)",
+    R"(STEAMUGC_INTERFACE_VERSION\d+)",
+
+    R"(SteamUser\d+)",
+    R"(STEAMUSERSTATS_INTERFACE_VERSION\d+)",
+
+    R"(SteamUtils\d+)",
+
+    R"(STEAMVIDEO_INTERFACE_V\d+)",
+
+    R"(STEAMUNIFIEDMESSAGES_INTERFACE_VERSION\d+)",
+
+    R"(SteamMasterServerUpdater\d+)",
 };
 
-// Scan DLL binary for all interface version strings
+// Scan DLL binary for all interface version strings using regex
 static std::vector<std::string> scan_interfaces(const std::string &dll_path)
 {
     std::ifstream file(std::filesystem::u8path(dll_path), std::ios::binary);
     if (!file) return {};
 
-    std::vector<char> data((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    std::string contents((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     file.close();
 
+    if (contents.empty()) return {};
+
     std::vector<std::string> results;
-    std::string content(data.begin(), data.end());
 
-    for (const char *prefix : interface_patterns) {
-        size_t plen = strlen(prefix);
-        size_t pos = 0;
-        bool found = false;
+    for (const auto &patt : interface_regex_patterns) {
+        std::regex interface_regex(patt);
+        auto begin = std::sregex_iterator(contents.cbegin(), contents.cend(), interface_regex);
+        auto end = std::sregex_iterator();
 
-        while ((pos = content.find(prefix, pos)) != std::string::npos) {
-            found = true;
-            // Collect trailing digits (if any)
-            size_t end = pos + plen;
-            while (end < content.size() && isdigit((unsigned char)content[end])) {
-                ++end;
-            }
-            results.push_back(content.substr(pos, end - pos));
-            pos = end;
+        std::vector<std::string> matches;
+        for (std::sregex_iterator i = begin; i != end; ++i) {
+            matches.push_back(i->str());
         }
 
-        // Special handling: in newer SDKs only SteamClient017 is valid
-        if (strcmp(prefix, "SteamClient") == 0 && found) {
-            auto it = std::find(results.begin(), results.end(), "SteamClient017");
-            results.erase(
-                std::remove_if(results.begin(), results.end(),
-                    [&](const std::string &s) {
-                        return s.find("SteamClient") == 0 && s != "SteamClient017";
-                    }),
-                results.end()
-            );
+        if (patt == R"(SteamClient\d+)" &&
+            matches.size() > 1 &&
+            std::find(matches.begin(), matches.end(), "SteamClient017") != matches.end())
+        {
+            // In newer SDKs, legacy steam_api.dll interface exports were removed
+            // except for SteamClient(), which still returns SteamClient017.
+            auto rm = std::remove_if(matches.begin(), matches.end(), [](const std::string &item) {
+                return (item != "SteamClient017");
+            });
+            matches.erase(rm, matches.end());
         }
+
+        results.insert(results.end(), matches.begin(), matches.end());
     }
-
-    // Sort and deduplicate
-    std::sort(results.begin(), results.end());
-    results.erase(std::unique(results.begin(), results.end()), results.end());
 
     return results;
 }
