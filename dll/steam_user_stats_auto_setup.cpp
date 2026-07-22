@@ -1402,7 +1402,6 @@ bool Steam_User_Stats::run_first_time_setup()
     int lang_count = (int)lang_codes.size();
 
     // Scan DLL for steam interface versions
-    std::string dll_path = get_dll_filepath();
     std::vector<std::string> interfaces = scan_interfaces(dll_path);
 
     // --- 5a: steam_appid.txt ---
