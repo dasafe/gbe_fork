@@ -1401,8 +1401,26 @@ bool Steam_User_Stats::run_first_time_setup()
     if (lang_codes.empty()) lang_codes = {"english"};
     int lang_count = (int)lang_codes.size();
 
-    // Scan DLL for steam interface versions
-    std::vector<std::string> interfaces = scan_interfaces(dll_path);
+    // Scan original DLL (steam_api[64]_o.dll) for steam interface versions
+    std::string original_dll;
+    std::string::size_type sep_pos = dll_path.find_last_of("\\/");
+    std::string dll_dir = (sep_pos != std::string::npos) ? dll_path.substr(0, sep_pos + 1) : "";
+    std::string try64 = dll_dir + "steam_api64_o.dll";
+    std::string try32 = dll_dir + "steam_api_o.dll";
+    if (std::filesystem::exists(std::filesystem::u8path(try64))) {
+        original_dll = try64;
+    } else if (std::filesystem::exists(std::filesystem::u8path(try32))) {
+        original_dll = try32;
+    }
+    if (!original_dll.empty()) {
+        printf("Scanning: %s\n", original_dll.c_str());
+        fflush(stdout);
+    } else {
+        printf("Original DLL not found, scanning emulator DLL instead.\n");
+        original_dll = dll_path;
+        fflush(stdout);
+    }
+    std::vector<std::string> interfaces = scan_interfaces(original_dll);
 
     // --- 5a: steam_appid.txt ---
     {
