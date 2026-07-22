@@ -49,6 +49,15 @@ static void console_open(const std::string &title)
 
 static void console_close()
 {
+    // Redirect std handles away from console first
+    freopen("NUL", "w", stdout);
+    freopen("NUL", "w", stderr);
+    freopen("NUL", "r", stdin);
+
+    // Hide the console window before freeing to avoid a lingering window
+    HWND hConWnd = GetConsoleWindow();
+    if (hConWnd) ShowWindow(hConWnd, SW_HIDE);
+
     FreeConsole();
 }
 
@@ -156,7 +165,7 @@ static void print_ok(const char *fmt, ...)
 {
     va_list args;
     va_start(args, fmt);
-    printf("  \033[32m\u2713\033[0m "); // green checkmark
+    printf("  \033[32m[OK]\033[0m "); // green OK
     vprintf(fmt, args);
     printf("\n");
     va_end(args);
@@ -167,7 +176,7 @@ static void print_fail(const char *fmt, ...)
 {
     va_list args;
     va_start(args, fmt);
-    printf("  \033[31m\u2717\033[0m "); // red cross
+    printf("  \033[31m[!!]\033[0m "); // red fail
     vprintf(fmt, args);
     printf("\n");
     va_end(args);
@@ -185,6 +194,212 @@ static void print_info(const char *fmt, ...)
     fflush(stdout);
 }
 
+
+// ============================================================
+// Steam interface detection (scan DLL for version strings)
+// ============================================================
+
+// Interface name prefixes to search for in the DLL binary
+// Each is a prefix optionally followed by digits (like "SteamFriends023")
+static const char *interface_patterns[] = {
+    "STEAMAPPS_INTERFACE_VERSION",
+    "SteamApps",
+    "STEAMAPPLIST_INTERFACE_VERSION",
+    "STEAMAPPTICKET_INTERFACE_VERSION",
+    "SteamClient",
+    "STEAMCONTROLLER_INTERFACE_VERSION",
+    "SteamController",
+    "SteamFriends",
+    "SteamGameServerStats",
+    "SteamGameCoordinator",
+    "SteamGameServer",
+    "STEAMHTMLSURFACE_INTERFACE_VERSION_",
+    "STEAMHTTP_INTERFACE_VERSION",
+    "SteamInput",
+    "STEAMINVENTORY_INTERFACE_V",
+    "SteamMatchMakingServers",
+    "SteamMatchMaking",
+    "SteamMatchGameSearch",
+    "SteamParties",
+    "STEAMMUSIC_INTERFACE_VERSION",
+    "STEAMMUSICREMOTE_INTERFACE_VERSION",
+    "SteamNetworkingMessages",
+    "SteamNetworkingSockets",
+    "SteamNetworkingUtils",
+    "SteamNetworking",
+    "STEAMPARENTALSETTINGS_INTERFACE_VERSION",
+    "STEAMREMOTEPLAY_INTERFACE_VERSION",
+    "STEAMREMOTESTORAGE_INTERFACE_VERSION",
+    "STEAMSCREENSHOTS_INTERFACE_VERSION",
+    "STEAMTIMELINE_INTERFACE_V",
+    "STEAMUGC_INTERFACE_VERSION",
+    "SteamUser",
+    "STEAMUSERSTATS_INTERFACE_VERSION",
+    "SteamUtils",
+    "STEAMVIDEO_INTERFACE_V",
+    "STEAMUNIFIEDMESSAGES_INTERFACE_VERSION",
+    "SteamMasterServerUpdater",
+};
+
+// Scan DLL binary for all interface version strings
+static std::vector<std::string> scan_interfaces(const std::string &dll_path)
+{
+    std::ifstream file(std::filesystem::u8path(dll_path), std::ios::binary);
+    if (!file) return {};
+
+    std::vector<char> data((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    file.close();
+
+    std::vector<std::string> results;
+    std::string content(data.begin(), data.end());
+
+    for (const char *prefix : interface_patterns) {
+        size_t plen = strlen(prefix);
+        size_t pos = 0;
+        bool found = false;
+
+        while ((pos = content.find(prefix, pos)) != std::string::npos) {
+            found = true;
+            // Collect trailing digits (if any)
+            size_t end = pos + plen;
+            while (end < content.size() && isdigit((unsigned char)content[end])) {
+                ++end;
+            }
+            results.push_back(content.substr(pos, end - pos));
+            pos = end;
+        }
+
+        // Special handling: in newer SDKs only SteamClient017 is valid
+        if (strcmp(prefix, "SteamClient") == 0 && found) {
+            auto it = std::find(results.begin(), results.end(), "SteamClient017");
+            results.erase(
+                std::remove_if(results.begin(), results.end(),
+                    [&](const std::string &s) {
+                        return s.find("SteamClient") == 0 && s != "SteamClient017";
+                    }),
+                results.end()
+            );
+        }
+    }
+
+    // Sort and deduplicate
+    std::sort(results.begin(), results.end());
+    results.erase(std::unique(results.begin(), results.end()), results.end());
+
+    return results;
+}
+
+// ============================================================
+// Language detection via Steam Store API
+// ============================================================
+
+// Map Steam Store display names to internal language codes
+static const char *map_store_lang_to_code(const std::string &name)
+{
+    struct LangMap { const char *display; const char *code; };
+    static const LangMap table[] = {
+        {"English",                "english"},
+        {"Portuguese - Brazil",    "brazilian"},
+        {"Portuguese - Portugal",  "portuguese"},
+        {"Portuguese",             "portuguese"},
+        {"French",                 "french"},
+        {"Italian",                "italian"},
+        {"German",                 "german"},
+        {"Japanese",               "japanese"},
+        {"Russian",                "russian"},
+        {"Simplified Chinese",     "schinese"},
+        {"Traditional Chinese",    "tchinese"},
+        {"Spanish - Latin America","latam"},
+        {"Spanish - Spain",        "spanish"},
+        {"Spanish",                "spanish"},
+        {"Korean",                 "koreana"},
+        {"Polish",                 "polish"},
+        {"Dutch",                  "dutch"},
+        {"Turkish",                "turkish"},
+        {"Swedish",                "swedish"},
+        {"Norwegian",              "norwegian"},
+        {"Danish",                 "danish"},
+        {"Czech",                  "czech"},
+        {"Romanian",               "romanian"},
+        {"Hungarian",              "hungarian"},
+        {"Finnish",                "finnish"},
+        {"Thai",                   "thai"},
+        {"Vietnamese",             "vietnamese"},
+        {"Arabic",                 "arabic"},
+        {"Ukrainian",              "ukrainian"},
+        {"Greek",                  "greek"},
+        {"Bulgarian",              "bulgarian"},
+        {"Croatian",               "croatian"},
+        {"Indonesian",             "indonesian"},
+        {"Malay",                  "malay"},
+        {"Slovak",                 "slovak"},
+    };
+    for (auto &m : table) {
+        if (name == m.display) return m.code;
+    }
+    return nullptr;
+}
+
+// Fetch supported languages from store API and map to internal codes
+static std::vector<std::string> fetch_supported_languages(uint32 appid)
+{
+    std::string url = "https://store.steampowered.com/api/appdetails?appids="
+        + std::to_string(appid) + "&cc=us&l=en";
+    std::string resp = http_get(url, 10L);
+    if (resp.empty()) return {};
+
+    try {
+        nlohmann::json j = nlohmann::json::parse(resp);
+        std::string appid_str = std::to_string(appid);
+        auto &data = j[appid_str]["data"];
+        if (data.is_null()) return {};
+
+        std::string raw = data.value("supported_languages", std::string{});
+        if (raw.empty()) return {};
+
+        // Split on <br> first (extraneous text follows)
+        static const std::string br_tag = "<br";
+        auto br_pos = raw.find(br_tag);
+        if (br_pos != std::string::npos) raw = raw.substr(0, br_pos);
+
+        // Strip remaining HTML tags and asterisks
+        std::string plain;
+        bool in_tag = false;
+        for (char ch : raw) {
+            if (ch == '<') { in_tag = true; continue; }
+            if (ch == '>') { in_tag = false; continue; }
+            if (!in_tag && ch != '*') plain += ch;
+        }
+
+        std::vector<std::string> codes;
+        size_t start = 0, end;
+        while ((end = plain.find(',', start)) != std::string::npos) {
+            std::string part = plain.substr(start, end - start);
+            // trim
+            auto first = part.find_first_not_of(" \t\r\n");
+            auto last = part.find_last_not_of(" \t\r\n");
+            if (first != std::string::npos) part = part.substr(first, last - first + 1);
+
+            const char *code = map_store_lang_to_code(part);
+            if (code) codes.emplace_back(code);
+            start = end + 1;
+        }
+        // Last part
+        {
+            std::string part = plain.substr(start);
+            auto first = part.find_first_not_of(" \t\r\n");
+            auto last = part.find_last_not_of(" \t\r\n");
+            if (first != std::string::npos) part = part.substr(first, last - first + 1);
+
+            const char *code = map_store_lang_to_code(part);
+            if (code) codes.emplace_back(code);
+        }
+
+        return codes;
+    } catch (...) {
+        return {};
+    }
+}
 
 // ============================================================
 // Steam Store API search
@@ -515,6 +730,18 @@ static std::string get_dll_filepath()
     return Local_Storage::get_program_path();
 }
 
+// Subclass proc for search edit control — ENTER key triggers search
+static LRESULT CALLBACK SearchEditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if (msg == WM_CHAR && wParam == VK_RETURN) {
+        // Find parent dialog and send Search button command
+        HWND hParent = GetParent(hwnd);
+        if (hParent) SendMessageA(hParent, WM_COMMAND, 100, 0);
+        return 0; // swallow the ding
+    }
+    return CallWindowProcA((WNDPROC)GetPropA(hwnd, "ORIG_WNDPROC"), hwnd, msg, wParam, lParam);
+}
+
 static LRESULT CALLBACK AppIDDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     auto *state = (AppIDSearchState*)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
@@ -582,17 +809,9 @@ static LRESULT CALLBACK AppIDDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             348, 286, 80, 26, hwnd, (HMENU)102, nullptr, nullptr);
         SendMessageA(hwnd_cancel, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-        // Target DLL path row
-        HWND hwnd_lbl3 = CreateWindowExA(0, "STATIC", "DLL Path:",
-            WS_CHILD | WS_VISIBLE, 12, 326, 65, 18,
-            hwnd, nullptr, nullptr, nullptr);
-        SendMessageA(hwnd_lbl3, WM_SETFONT, (WPARAM)hFont, TRUE);
-
-        std::string dll_filepath = get_dll_filepath();
-        HWND hwnd_target = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", dll_filepath.c_str(),
-            WS_CHILD | WS_VISIBLE | ES_READONLY | ES_AUTOHSCROLL,
-            80, 322, 462, 24, hwnd, nullptr, nullptr, nullptr);
-        SendMessageA(hwnd_target, WM_SETFONT, (WPARAM)hFont, TRUE);
+        // Subclass search edit so ENTER triggers search
+        SetPropA(state->hwnd_search_edit, "ORIG_WNDPROC",
+            (HANDLE)SetWindowLongPtrA(state->hwnd_search_edit, GWLP_WNDPROC, (LONG_PTR)SearchEditSubclassProc));
 
         // Pre-populate if results exist (shouldn't happen now that search is async)
         if (!state->results.empty()) {
@@ -831,7 +1050,7 @@ static uint32 run_appid_dialog(const std::string &auto_search_name)
     }
 
     DWORD dwStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    RECT rcWin = { 0, 0, 554, 356 };
+    RECT rcWin = { 0, 0, 554, 330 };
     AdjustWindowRectEx(&rcWin, dwStyle, FALSE, 0);
     int win_w = rcWin.right - rcWin.left;
     int win_h = rcWin.bottom - rcWin.top;
@@ -962,7 +1181,7 @@ bool Steam_User_Stats::run_first_time_setup()
     console_open("Goldberg Emulator - Auto Setup");
     printf("=== Goldberg Emulator - Auto Setup ===\n\n");
     printf("Game:     \033[1m%s\033[0m\n", game_name.c_str());
-    printf("AppID:    %u\n", appid);
+    printf("AppID:    %u\n\n", appid);
     printf("DLL Path: %s\n\n", dll_path.c_str());
 
     // --- Prompt to start ---
@@ -1018,7 +1237,7 @@ bool Steam_User_Stats::run_first_time_setup()
     if (schema_en.is_null() || schema_en["game"].is_null() ||
         schema_en["game"]["availableGameStats"].is_null())
     {
-        print_fail("Failed to fetch schema — check your API key and internet connection");
+        print_fail("Failed to fetch schema - check your API key and internet connection");
         printf("\nPress ENTER to continue...\n");
         console_wait_enter();
         console_close();
@@ -1053,6 +1272,7 @@ bool Steam_User_Stats::run_first_time_setup()
 
     // First populate English from schema_en
     if (achs_en.is_array()) {
+        int idx = 0;
         for (const auto &ach : achs_en) {
             std::string name = ach.value("name", std::string{});
             if (name.empty()) continue;
@@ -1062,7 +1282,12 @@ bool Steam_User_Stats::run_first_time_setup()
             entry["hidden"] = ach.value("hidden", 0);
             entry["icon"] = ach.value("icon", std::string{});
             entry["icongray"] = ach.value("icongray", std::string{});
+            // Store token and unlock_percentage for later
+            entry["token_name"] = "NEW_ACHIEVEMENT_1_" + std::to_string(idx) + "_NAME";
+            entry["token_desc"] = "NEW_ACHIEVEMENT_1_" + std::to_string(idx) + "_DESC";
+            entry["unlock_percentage"] = ach.value("unlock_percentage", 0.0);
             ach_translations[name] = entry;
+            ++idx;
         }
     }
 
@@ -1099,11 +1324,11 @@ bool Steam_User_Stats::run_first_time_setup()
                     print_ok("  Spanish: %d translations", merged);
                     has_spanish = true;
                 } else {
-                    print_info("  (Spanish not available — same as English)");
+                    print_info("  (Spanish not available - same as English)");
                 }
             }
         } else {
-            print_info("  (skipped — no response)");
+            print_info("  (skipped - no response)");
         }
     }
 
@@ -1113,39 +1338,56 @@ bool Steam_User_Stats::run_first_time_setup()
     printf("\nStep 4/5: Downloading achievement icons...\n");
     fflush(stdout);
 
-    std::string icons_dir = settings_path + "achievement_images" + PATH_SEPARATOR;
+    std::string icons_dir = settings_path + "ach_images" + PATH_SEPARATOR;
+    std::string locked_dir = icons_dir + "locked" + PATH_SEPARATOR;
     std::error_code ec;
     std::filesystem::create_directories(std::filesystem::u8path(icons_dir), ec);
+    std::filesystem::create_directories(std::filesystem::u8path(locked_dir), ec);
 
-    int icons_downloaded = 0;
-    int icons_total = 0;
+    // First pass: count total downloadable icons
+    int dl_total = 0;
     for (auto &[name, entry] : ach_translations) {
-        auto download_icon = [&](const std::string &key, const std::string &url) {
-            if (url.empty()) return;
-            icons_total++;
-            std::string fname = extract_filename(url);
-            if (fname.empty()) return;
-            std::string full_path = icons_dir + fname;
-            if (file_size_(full_path)) {
-                icons_downloaded++;
-                return; // already cached
-            }
-            auto img = http_get_binary(url);
-            if (!img.data.empty()) {
-                std::ofstream fout(std::filesystem::u8path(full_path), std::ios::binary);
-                fout.write(img.data.data(), img.data.size());
-                icons_downloaded++;
-            }
-        };
-
-        download_icon("icon", entry["icon"].get<std::string>());
-        download_icon("icongray", entry["icongray"].get<std::string>());
+        if (!entry["icon"].get<std::string>().empty()) dl_total++;
+        if (!entry["icongray"].get<std::string>().empty()) dl_total++;
     }
 
-    if (icons_total > 0) {
-        print_ok("Downloaded %d/%d icons", icons_downloaded, icons_total);
-    } else {
+    int icons_downloaded = 0;
+    int icons_total = dl_total;
+    if (dl_total == 0) {
         print_info("No icons to download");
+    } else {
+        for (auto &[name, entry] : ach_translations) {
+            auto dl_one = [&](const std::string &key, const std::string &subdir) {
+                std::string url = entry[key].get<std::string>();
+                if (url.empty()) return;
+
+                std::string fname = extract_filename(url);
+                if (fname.empty()) return;
+                std::string full_path = subdir + fname;
+
+                if (!file_size_(full_path)) {
+                    auto img = http_get_binary(url);
+                    if (!img.data.empty()) {
+                        std::ofstream fout(std::filesystem::u8path(full_path), std::ios::binary);
+                        fout.write(img.data.data(), img.data.size());
+                    }
+                }
+
+                icons_downloaded++;
+                int pct = icons_downloaded * 100 / icons_total;
+                int bar_w = 40;
+                int filled = icons_downloaded * bar_w / icons_total;
+                printf("\r  [");
+                for (int i = 0; i < bar_w; i++) putchar(i < filled ? '#' : '.');
+                printf("] %d%% (%d/%d)", pct, icons_downloaded, icons_total);
+                fflush(stdout);
+            };
+
+            dl_one("icon", icons_dir);
+            dl_one("icongray", locked_dir);
+        }
+        printf("\n");
+        print_ok("Downloaded %d/%d icons", icons_downloaded, icons_total);
     }
 
     // ============================================================
@@ -1153,6 +1395,15 @@ bool Steam_User_Stats::run_first_time_setup()
     // ============================================================
     printf("\nStep 5/5: Writing files...\n");
     fflush(stdout);
+
+    // Fetch supported languages from store API
+    std::vector<std::string> lang_codes = fetch_supported_languages(appid);
+    if (lang_codes.empty()) lang_codes = {"english"};
+    int lang_count = (int)lang_codes.size();
+
+    // Scan DLL for steam interface versions
+    std::string dll_path = get_dll_filepath();
+    std::vector<std::string> interfaces = scan_interfaces(dll_path);
 
     // --- 5a: steam_appid.txt ---
     {
@@ -1171,52 +1422,76 @@ bool Steam_User_Stats::run_first_time_setup()
         std::string filepath = settings_path + "supported_languages.txt";
         std::ofstream fout(std::filesystem::u8path(filepath), std::ios::trunc);
         if (fout) {
-            fout << "english\n";
-            if (has_spanish) fout << "spanish\n";
-            print_ok("supported_languages.txt (english%s)", has_spanish ? " + spanish" : "");
+            for (auto &code : lang_codes) {
+                fout << code << "\n";
+            }
+            print_ok("supported_languages.txt (%d languages)", lang_count);
         } else {
             print_fail("supported_languages.txt (write error)");
         }
     }
 
-    // --- 5c: achievements.json ---
+    // --- 5c: steam_interfaces.txt ---
+    {
+        std::string filepath = settings_path + "steam_interfaces.txt";
+        std::ofstream fout(std::filesystem::u8path(filepath), std::ios::trunc);
+        if (fout) {
+            for (auto &iface : interfaces) {
+                fout << iface << "\n";
+            }
+            print_ok("steam_interfaces.txt (%zu interfaces)", interfaces.size());
+        } else {
+            print_fail("steam_interfaces.txt (write error)");
+        }
+    }
+
+    // --- 5d: achievements.json ---
     {
         nlohmann::json ach_array = nlohmann::json::array();
         for (const auto &[name, entry] : ach_translations) {
             nlohmann::json ach;
             ach["name"] = name;
-            ach["hidden"] = entry["hidden"].get<int>() ? "1" : "0";
+            ach["hidden"] = entry["hidden"].get<int>();
 
-            // Simplify displayName/description to simple string if only English
-            auto &dn = entry["displayName"];
-            auto &desc = entry["description"];
-            if (dn.size() == 1 && dn.contains("english")) {
-                ach["displayName"] = dn["english"].get<std::string>();
-            } else {
-                ach["displayName"] = dn;
+            // Localized displayName + token (matching manual format)
+            nlohmann::json dn_obj;
+            dn_obj["english"] = entry["displayName"]["english"].get<std::string>();
+            dn_obj["token"] = entry["token_name"].get<std::string>();
+            ach["displayName"] = dn_obj;
+
+            // Localized description + token
+            nlohmann::json desc_obj;
+            desc_obj["english"] = entry["description"]["english"].get<std::string>();
+            desc_obj["token"] = entry["token_desc"].get<std::string>();
+            ach["description"] = desc_obj;
+
+            // Spanish translations if available
+            if (entry["displayName"].contains("spanish")) {
+                ach["displayName"]["spanish"] = entry["displayName"]["spanish"].get<std::string>();
             }
-            if (desc.size() == 1 && desc.contains("english")) {
-                ach["description"] = desc["english"].get<std::string>();
-            } else {
-                ach["description"] = desc;
+            if (entry["description"].contains("spanish")) {
+                ach["description"]["spanish"] = entry["description"]["spanish"].get<std::string>();
             }
 
             // Icon paths (relative to steam_settings/)
             {
                 std::string icon_fname = extract_filename(entry["icon"].get<std::string>());
                 if (!icon_fname.empty()) {
-                    ach["icon"] = "achievement_images" PATH_SEPARATOR + icon_fname;
+                    ach["icon"] = "ach_images/" + icon_fname;
                 }
             }
+            // Locked icon -> ach_images/locked/
             {
                 std::string icon_fname = extract_filename(entry["icongray"].get<std::string>());
                 if (!icon_fname.empty()) {
-                    ach["icon_gray"] = "achievement_images" PATH_SEPARATOR + icon_fname;
+                    ach["icon_gray"] = "ach_images/locked/" + icon_fname;
                 }
             }
 
-            ach["icon_handle"] = Settings::UNLOADED_IMAGE_HANDLE;
-            ach["icon_gray_handle"] = Settings::UNLOADED_IMAGE_HANDLE;
+            // Unlock percentage from Steam API
+            if (entry.contains("unlock_percentage")) {
+                ach["unlock_percentage"] = entry["unlock_percentage"].get<double>();
+            }
 
             ach_array.push_back(std::move(ach));
         }
@@ -1233,7 +1508,7 @@ bool Steam_User_Stats::run_first_time_setup()
         }
     }
 
-    // --- 5d: stats.json ---
+    // --- 5e: stats.json ---
     {
         nlohmann::json stats_array = nlohmann::json::array();
         if (stats_en.is_array()) {
@@ -1279,7 +1554,7 @@ bool Steam_User_Stats::run_first_time_setup()
         }
     }
 
-    // --- 5e: branches.json ---
+    // --- 5f: branches.json ---
     {
         nlohmann::json branches_array = nlohmann::json::array();
         nlohmann::json public_branch;
@@ -1311,7 +1586,7 @@ bool Steam_User_Stats::run_first_time_setup()
         printf("  Branch: public (build %u)\n", latest_build);
     }
     printf("  Achievements: %zu\n", ach_translations.size());
-    printf("  Languages: %s\n", has_spanish ? "english, spanish" : "english");
+    printf("  Languages: %d\n", lang_count);
     printf("  Icons: %d/%d\n\n", icons_downloaded, icons_total);
     printf("\033[1;33mREADY TO PLAY\033[0m\n");
     printf("Press ENTER to start the game...\n");
