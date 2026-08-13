@@ -25,6 +25,7 @@
 #include <cstdarg> // va_list, va_start, va_end
 #include <gdiplus.h>
 #include <regex>
+#include <tlhelp32.h> // CreateToolhelp32Snapshot for thread suspension
 
 
 // ============================================================
@@ -1097,7 +1098,9 @@ static uint32 run_appid_dialog(const std::string &auto_search_name)
     // game's own message queue).
     MSG msg = {};
     while (IsWindow(hwnd)) {
-        if (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        // Only pump messages for the dialog (and its children), so the
+        // game's own window messages aren't dispatched during setup
+        if (PeekMessageA(&msg, hwnd, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessageA(&msg);
         } else {
@@ -1167,11 +1170,72 @@ static nlohmann::json fetch_schema_lang(const std::string &api_key, uint32 appid
 
 
 // ============================================================
+// Suspend all other threads of the process while the setup wizard
+// runs, so the game doesn't execute at all until setup is complete.
+// Threads are resumed on destruction (covers all return paths).
+// ============================================================
+
+struct SuspendedThread {
+    HANDLE handle;
+    DWORD resume_count;
+};
+
+struct ThreadSuspender {
+    std::vector<SuspendedThread> threads;
+
+    ThreadSuspender()
+    {
+        DWORD pid = GetCurrentProcessId();
+        DWORD self = GetCurrentThreadId();
+
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (snap == INVALID_HANDLE_VALUE) return;
+
+        THREADENTRY32 te = {};
+        te.dwSize = sizeof(THREADENTRY32);
+        if (Thread32First(snap, &te)) {
+            do {
+                if (te.th32OwnerProcessID != pid) continue;
+                if (te.th32ThreadID == self) continue;
+
+                HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
+                if (!hThread) continue;
+
+                // SuspendThread returns the previous suspend count; we need to
+                // resume that many times + 1 to bring the thread back to running
+                DWORD prev = SuspendThread(hThread);
+                if (prev != (DWORD)-1) {
+                    threads.push_back({ hThread, prev + 1 });
+                } else {
+                    CloseHandle(hThread);
+                }
+            } while (Thread32Next(snap, &te));
+        }
+        CloseHandle(snap);
+    }
+
+    ~ThreadSuspender()
+    {
+        // Resume in reverse order
+        for (auto it = threads.rbegin(); it != threads.rend(); ++it) {
+            for (DWORD i = 0; i < it->resume_count; ++i) {
+                ResumeThread(it->handle);
+            }
+            CloseHandle(it->handle);
+        }
+    }
+};
+
+
+// ============================================================
 // MAIN: run_first_time_setup()
 // ============================================================
 
 bool Steam_User_Stats::run_first_time_setup()
 {
+    // Suspend all other threads for the whole setup; resumed on exit
+    ThreadSuspender suspender;
+
     uint32 appid = settings->get_local_game_id().AppID();
     std::string search_name = derive_search_name();
     if (!appid) {
@@ -1522,7 +1586,9 @@ bool Steam_User_Stats::run_first_time_setup()
             ach_array.push_back(std::move(ach));
         }
 
-        if (!ach_array.empty()) {
+        // Always write the file, even when empty, so the wizard doesn't
+        // re-run on the next launch for games without achievements
+        {
             std::string filepath = settings_path + std::string(achievements_user_file);
             std::ofstream fout(std::filesystem::u8path(filepath), std::ios::trunc);
             if (fout) {

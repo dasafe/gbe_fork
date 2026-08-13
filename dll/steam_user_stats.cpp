@@ -65,8 +65,11 @@ Steam_User_Stats::Steam_User_Stats(Settings *settings, class Networking *network
     }
 
     // First-time setup: show console, generate steam_settings files
+    // Trigger on file absence (not parsed content), so an empty achievements.json
+    // (game with no achievements) doesn't re-run the wizard on every launch
     if (!settings->disable_networking && settings_disable_lan_only() &&
-        settings->first_run_auto_setup && defined_achievements.empty())
+        settings->first_run_auto_setup &&
+        !file_exists_(Local_Storage::get_game_settings_path() + achievements_user_file))
     {
         if (run_first_time_setup()) {
             // Reload from newly written files
