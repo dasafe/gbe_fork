@@ -859,18 +859,10 @@ void Steam_Overlay::show_test_achievement()
     }
 
     post_achievement_notification(ach, for_progress);
-    // Mirror test toast to HMD when VR is active (Toast Setup preview path).
-    if (IsVRActive() && vr_bridge) {
-        VRAchToast toast{};
-        toast.name = "gbe_test_achievement";
-        toast.title = ach.title;
-        toast.description = ach.description;
-        toast.progress = ach.progress;
-        toast.max_progress = ach.max_progress;
-        toast.achieved = ach.achieved;
-        toast.for_progress = for_progress;
-        vr_bridge->QueueToast(toast);
-    }
+    // NOTE: no extra VR queue here: post_achievement_notification() already
+    // routes HMD-exclusive when VR is active (with the random icon above),
+    // otherwise desktop. The Toast Setup "Test VR toast" button calls
+    // VROverlayBridge::ShowTestToast() directly for placement previews.
     // sound is now played when notification is actually shown (delayed with queue)
 }
 
@@ -1709,6 +1701,17 @@ void Steam_Overlay::post_achievement_notification(Overlay_Achievement &ach, bool
         toast.achieved = ach.achieved;
         toast.for_progress = for_progress;
         toast.unlock_time = ach.unlock_time;
+        toast.rare = ach.unlock_percentage >= 0.0f && ach.unlock_percentage <= 10.0f;
+        // Copy icon RGBA for the HMD toast PNG (GPU resource stays on desktop path).
+        {
+            int handle = toast.achieved ? ach.icon_handle : ach.icon_gray_handle;
+            Image_Data *img = settings->get_image(handle);
+            if (img && !img->data.empty() && img->width > 0 && img->width == img->height &&
+                img->data.size() == (size_t)img->width * img->height * 4) {
+                toast.icon_rgba = img->data;
+                toast.icon_size = img->width;
+            }
+        }
         vr_bridge->QueueToast(toast);
         // Sound stays on: audible in HMD via SteamVR audio mirroring.
         notify_sound_user_achievement();
@@ -2536,6 +2539,52 @@ void Steam_Overlay::render_main_window()
                 ImGui::Text("%s", translationLanguage[current_language]);
                 ImGui::ListBox("##language", &current_language, valid_languages, sizeof(valid_languages) / sizeof(valid_languages[0]), 7);
                 ImGui::Text(translationSelectedLanguage[current_language], valid_languages[current_language]);
+
+                ImGui::Separator();
+
+                // VR achievement toasts (HMD) + dashboard tab setup.
+                // Live session editing; persist via steam_settings configs.overlay.ini [overlay::vr].
+                {
+                    bool vr_detected = vr_bridge && vr_bridge->IsActive();
+                    ImGui::Text("VR achievements: %s", vr_detected ? "HMD active" : "flat / no runtime");
+                    const char *anchors[] = { "Left wrist", "Right wrist", "Head", "Chest (knee-chest)", "Dashboard only" };
+                    int anchor_idx = settings->vr_overlay_config.anchor;
+                    if (anchor_idx < 0 || anchor_idx > 4) anchor_idx = 0;
+                    if (ImGui::Combo("VR toast anchor", &anchor_idx, anchors, 5)) {
+                        settings->vr_overlay_config.anchor = anchor_idx;
+                        if (vr_bridge) vr_bridge->SetAnchor((VRToastAnchor)anchor_idx);
+                    }
+                    float w = settings->vr_overlay_config.width_m;
+                    if (ImGui::SliderFloat("VR toast size (m)", &w, 0.08f, 0.30f)) {
+                        if (vr_bridge) vr_bridge->SetWidth(w);
+                        else settings->vr_overlay_config.width_m = w;
+                    }
+                    float ox = settings->vr_overlay_config.offset_x;
+                    float oy = settings->vr_overlay_config.offset_y;
+                    float oz = settings->vr_overlay_config.offset_z;
+                    bool off_changed = false;
+                    off_changed |= ImGui::SliderFloat("VR offset X", &ox, -0.50f, 0.50f);
+                    off_changed |= ImGui::SliderFloat("VR offset Y", &oy, -0.50f, 0.50f);
+                    off_changed |= ImGui::SliderFloat("VR offset Z", &oz, -0.50f, 0.50f);
+                    if (off_changed && vr_bridge) vr_bridge->SetOffset(ox, oy, oz);
+                    else if (off_changed) {
+                        settings->vr_overlay_config.offset_x = ox;
+                        settings->vr_overlay_config.offset_y = oy;
+                        settings->vr_overlay_config.offset_z = oz;
+                    }
+                    float tilt = settings->vr_overlay_config.tilt_deg;
+                    if (ImGui::SliderFloat("VR wrist tilt (deg)", &tilt, 0.0f, 90.0f)) {
+                        if (vr_bridge) vr_bridge->SetTilt(tilt);
+                        else settings->vr_overlay_config.tilt_deg = tilt;
+                    }
+                    ImGui::SliderFloat("VR toast duration (s, <=0 auto)", &settings->vr_overlay_config.duration_sec, -1.0f, 15.0f);
+                    ImGui::Checkbox("Suppress desktop achievement toast in VR", &settings->vr_overlay_config.suppress_desktop_achievements);
+                    ImGui::Checkbox("Fall back to head if wrist untracked", &settings->vr_overlay_config.fallback_to_head);
+                    if (ImGui::Button("Test VR toast")) {
+                        if (vr_bridge) vr_bridge->ShowTestToast();
+                        else show_test_achievement();
+                    }
+                }
 
                 ImGui::Separator();
 

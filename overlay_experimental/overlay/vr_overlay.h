@@ -55,7 +55,10 @@ struct VRAchToast {
     uint32 max_progress{};
     bool achieved{};
     bool for_progress{};
+    bool rare{}; // <=10% global unlock rate: gold border in HMD toast
     uint32 unlock_time{};
+    std::string icon_rgba{};   // copied RGBA bytes (square), may be empty
+    uint32 icon_size{};        // width == height
     std::chrono::milliseconds trigger_time{};
     std::chrono::milliseconds scheduled_show_time{};
 };

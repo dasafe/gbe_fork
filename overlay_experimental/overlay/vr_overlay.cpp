@@ -1,6 +1,7 @@
 #ifdef EMU_OVERLAY
 
 #include "overlay/vr_overlay.h"
+#include "overlay/vr_toast_image.h"
 #include "dll/dll.h" // PRINT_DEBUG
 #include <cstdlib>
 #include <fstream>
@@ -250,10 +251,35 @@ void VROverlayBridge::write_companion_toast_file(const VRAchToast &toast)
 {
     try {
         auto tmp = std::filesystem::temp_directory_path();
-        auto path = tmp / "gbe_vr_achievement_toast.json";
+        auto json_path = tmp / "gbe_vr_achievement_toast.json";
+        auto png_path = tmp / "gbe_vr_achievement_toast.png";
+        auto dash_path = tmp / "gbe_vr_dashboard.json";
         std::string anchor = VROverlayConfig::anchor_to_string(settings->vr_overlay_config.anchor);
         float width = settings->vr_overlay_config.width_m;
-        std::ofstream f(path, std::ios::trunc);
+
+        // Compose + write the toast PNG (icon + title + description + progress).
+        // This file is what SetOverlayFromFile (Phase 2b) and companion tools
+        // (OVR Toolkit / XSOverlay) display in-headset.
+        std::string png_str = png_path.string();
+        {
+            VRToastImageRequest req{};
+            req.title = toast.title;
+            req.description = toast.description;
+            req.icon_rgba = toast.icon_rgba;
+            req.icon_size = toast.icon_size;
+            req.progress = toast.progress;
+            req.max_progress = toast.max_progress;
+            req.for_progress = toast.for_progress;
+            req.rare = toast.rare;
+            VRToastImage img{};
+            std::vector<uint8_t> png{};
+            if (ComposeVRToastImage(req, img) && EncodeVRToastPNG(img, png) && !png.empty()) {
+                std::ofstream pf(png_path, std::ios::binary | std::ios::trunc);
+                if (pf) pf.write(reinterpret_cast<const char *>(png.data()), (std::streamsize)png.size());
+            }
+        }
+
+        std::ofstream f(json_path, std::ios::trunc);
         if (!f) return;
         f << "{"
           << "\"name\":\"" << json_escape(toast.name) << "\","
@@ -261,11 +287,28 @@ void VROverlayBridge::write_companion_toast_file(const VRAchToast &toast)
           << "\"description\":\"" << json_escape(toast.description) << "\","
           << "\"achieved\":" << (toast.achieved ? "true" : "false") << ","
           << "\"for_progress\":" << (toast.for_progress ? "true" : "false") << ","
+          << "\"rare\":" << (toast.rare ? "true" : "false") << ","
           << "\"progress\":" << toast.progress << ","
           << "\"max_progress\":" << toast.max_progress << ","
           << "\"anchor\":\"" << anchor << "\","
-          << "\"width_m\":" << width
+          << "\"width_m\":" << width << ","
+          << "\"image\":\"" << json_escape(png_str) << "\""
           << "}";
+
+        // Dashboard history snapshot for the future native tab + tools.
+        std::ofstream d(dash_path, std::ios::trunc);
+        if (d) {
+            d << "{\"history\":[";
+            bool first = true;
+            for (const auto &e : dashboard_history) {
+                if (!first) d << ",";
+                first = false;
+                d << "{\"title\":\"" << json_escape(e.title) << "\","
+                  << "\"description\":\"" << json_escape(e.description) << "\","
+                  << "\"achieved\":" << (e.achieved ? "true" : "false") << "}";
+            }
+            d << "]}";
+        }
     } catch (...) {
         // best-effort only
     }
