@@ -4,6 +4,7 @@
 #include "overlay/vr_toast_image.h"
 #include "dll/dll.h" // PRINT_DEBUG
 #include <cstdlib>
+#include <cmath>
 #include <fstream>
 #include <filesystem>
 
@@ -64,6 +65,9 @@ void VROverlayBridge::Setup()
 void VROverlayBridge::Shutdown()
 {
     std::lock_guard<std::recursive_mutex> lock(vr_mutex);
+    // Hide + destroy native overlays first (needs the interfaces + module).
+    // Never calls VR_Shutdown: the game owns the VR lifecycle.
+    shutdown_native();
     // NOTE: real IVROverlay_DestroyOverlay calls land here once native upload
     // is implemented (Phase 2). For now just drop handles + unload the module.
     scene_overlay_handle = 0;
@@ -196,27 +200,247 @@ bool VROverlayBridge::IsActive()
     return true;
 }
 
+static gbe_vr::VR_GetGenericInterface_Fn native_get_interface_proc(void *module)
+{
+    if (!module) return nullptr;
+#ifdef __WINDOWS__
+    FARPROC p = GetProcAddress((HMODULE)module, "VR_GetGenericInterface");
+    return (gbe_vr::VR_GetGenericInterface_Fn)p;
+#else
+    void *p = dlsym(module, "VR_GetGenericInterface");
+    return (gbe_vr::VR_GetGenericInterface_Fn)p;
+#endif
+}
+
+static gbe_vr::VR_Init_Fn native_init_proc(void *module)
+{
+    if (!module) return nullptr;
+#ifdef __WINDOWS__
+    FARPROC p = GetProcAddress((HMODULE)module, "VR_Init");
+    return (gbe_vr::VR_Init_Fn)p;
+#else
+    void *p = dlsym(module, "VR_Init");
+    return (gbe_vr::VR_Init_Fn)p;
+#endif
+}
+
+bool VROverlayBridge::init_native()
+{
+    // Lock is held by callers (ensure_overlays / show path).
+    if (native_available && native_overlay) return true;
+    native_available = false;
+    native_overlay = nullptr;
+    native_system = nullptr;
+    if (!openvr_module) return false;
+
+    auto get_iface = native_get_interface_proc(openvr_module);
+    if (!get_iface) {
+        PRINT_DEBUG("openvr_api has no VR_GetGenericInterface export");
+        return false;
+    }
+
+    gbe_vr::EVRInitError err = gbe_vr::VRInitError_None;
+    void *ov = get_iface(gbe_vr::k_IVROverlay_Version, &err);
+    if (!ov || err != gbe_vr::VRInitError_None) {
+        // Nobody in this process inited VR yet (e.g. flat game with SteamVR
+        // running): init overlay-mode ourselves so toasts still reach the HMD.
+        auto vr_init = native_init_proc(openvr_module);
+        if (vr_init) {
+            vr_init(&err, gbe_vr::VRApplication_Overlay);
+            if (err == gbe_vr::VRInitError_None)
+                ov = get_iface(gbe_vr::k_IVROverlay_Version, &err);
+        }
+    }
+    if (!ov || err != gbe_vr::VRInitError_None) {
+        PRINT_DEBUG("IVROverlay_028 unavailable (err=%i), companion-file fallback", (int)err);
+        return false;
+    }
+    native_overlay = (gbe_vr::IVROverlay_028 *)ov;
+
+    // IVRSystem is optional: only needed for wrist controller role lookup.
+    // Head/chest anchors use HMD index 0 without it.
+    gbe_vr::EVRInitError serr = gbe_vr::VRInitError_None;
+    void *sys = get_iface(gbe_vr::k_IVRSystem_Version, &serr);
+    if (sys && serr == gbe_vr::VRInitError_None)
+        native_system = (gbe_vr::IVRSystem_026 *)sys;
+
+    // Scene toast overlay (Find first: keys survive across Setup cycles).
+    gbe_vr::VROverlayHandle_t scene = 0;
+    if (native_overlay->FindOverlay("gbe.scene.toast", &scene) != gbe_vr::VROverlayError_None || !scene) {
+        if (native_overlay->CreateOverlay("gbe.scene.toast", "GBE Achievement Toast", &scene) != gbe_vr::VROverlayError_None || !scene) {
+            PRINT_DEBUG("CreateOverlay(scene) failed, companion-file fallback");
+            native_overlay = nullptr;
+            native_system = nullptr;
+            return false;
+        }
+    }
+    scene_overlay_handle = (uint64_t)scene;
+    native_overlay->SetOverlaySortOrder(scene, 10);
+    native_overlay->SetOverlayWidthInMeters(scene, settings->vr_overlay_config.width_m);
+
+    // Dashboard tab overlay.
+    gbe_vr::VROverlayHandle_t dash_main = 0, dash_thumb = 0;
+    if (native_overlay->FindOverlay("gbe.achievements", &dash_main) != gbe_vr::VROverlayError_None || !dash_main) {
+        if (native_overlay->CreateDashboardOverlay("gbe.achievements", "GBE Achievements", &dash_main, &dash_thumb) == gbe_vr::VROverlayError_None && dash_main) {
+            dashboard_overlay_handle = (uint64_t)dash_main;
+            dashboard_thumb_handle = (uint64_t)dash_thumb;
+        } else {
+            PRINT_DEBUG("CreateDashboardOverlay failed (non-fatal)");
+        }
+    } else {
+        dashboard_overlay_handle = (uint64_t)dash_main;
+    }
+
+    native_available = true;
+    PRINT_DEBUG("native IVROverlay ready (scene=%llu dash=%llu sys=%p)",
+        (unsigned long long)scene_overlay_handle,
+        (unsigned long long)dashboard_overlay_handle, native_system);
+    return true;
+}
+
+void VROverlayBridge::shutdown_native()
+{
+    // Lock is held by Shutdown(). Never calls VR_Shutdown (game owns VR).
+    if (native_overlay) {
+        if (scene_visible && scene_overlay_handle) {
+            native_overlay->HideOverlay((gbe_vr::VROverlayHandle_t)scene_overlay_handle);
+            scene_visible = false;
+        }
+        if (scene_overlay_handle) {
+            native_overlay->DestroyOverlay((gbe_vr::VROverlayHandle_t)scene_overlay_handle);
+            scene_overlay_handle = 0;
+        }
+        if (dashboard_overlay_handle) {
+            native_overlay->DestroyOverlay((gbe_vr::VROverlayHandle_t)dashboard_overlay_handle);
+            dashboard_overlay_handle = 0;
+            dashboard_thumb_handle = 0;
+        }
+    }
+    native_overlay = nullptr;
+    native_system = nullptr;
+    native_available = false;
+    overlays_created = false;
+}
+
 bool VROverlayBridge::ensure_overlays()
 {
     if (overlays_created) return true;
     if (!runtime_available) return false;
-    // Phase 2: VROverlay()->CreateOverlay("gbe.scene.toast", ...) +
-    // CreateDashboardOverlay("gbe.achievements", "Achievements", ...).
-    // Stubbed until OpenVR headers are vendored; companion file covers Phase 1.
-    // Mark created so we don't spam probe logs; real handles assigned in Phase 2.
+    if (!init_native()) {
+        // Native path unavailable (old SteamVR, no HMD session): the
+        // companion PNG+JSON files still carry the toast to overlay tools.
+        // Mark created to avoid spamming init attempts every toast; a fresh
+        // probe happens on next Setup() cycle.
+        overlays_created = true;
+        return false;
+    }
     overlays_created = true;
     return true;
 }
 
+// Build the device-relative transform for the current anchor preset.
+// OpenVR: +y up, overlay plane faces +z. Wrist watch-face tips up toward the
+// eyes by tilt_deg; head floats ahead; chest sits low and tips up.
+static gbe_vr::HmdMatrix34_t build_anchor_matrix(VRToastAnchor anchor, float ox, float oy, float oz, float tilt_deg)
+{
+    const float pi = 3.14159265358979323846f;
+    float tilt = -tilt_deg * pi / 180.0f; // tip normal from +z toward +y
+    float tx = ox, ty = oy, tz = oz;
+
+    switch (anchor) {
+        case VRToastAnchor::head:
+            tx += 0.0f; ty += -0.05f; tz += -0.60f;
+            tilt = 0.0f;
+            break;
+        case VRToastAnchor::chest:
+            tx += 0.0f; ty += -0.40f; tz += -0.55f;
+            tilt = -20.0f * pi / 180.0f;
+            break;
+        case VRToastAnchor::left_wrist:
+        case VRToastAnchor::right_wrist:
+        case VRToastAnchor::dashboard_only:
+        default:
+            break; // wrist: user offset + tilt as configured
+    }
+
+    float c = cosf(tilt), s = sinf(tilt);
+    gbe_vr::HmdMatrix34_t m{};
+    m.m[0][0] = 1.0f; m.m[0][1] = 0.0f; m.m[0][2] = 0.0f; m.m[0][3] = tx;
+    m.m[1][0] = 0.0f; m.m[1][1] = c;    m.m[1][2] = -s;   m.m[1][3] = ty;
+    m.m[2][0] = 0.0f; m.m[2][1] = s;    m.m[2][2] = c;    m.m[2][3] = tz;
+    return m;
+}
+
+float VROverlayBridge::toast_duration_sec() const
+{
+    float d = settings ? settings->vr_overlay_config.duration_sec : -1.0f;
+    if (d > 0.0f) return d;
+    if (settings) return settings->overlay_appearance.notification_duration_achievement / 1000.0f;
+    return 7.0f;
+}
+
 void VROverlayBridge::apply_anchor_transform()
 {
-    // Phase 2: translate vr_overlay_config {anchor,width,offset,tilt} into
-    // SetOverlayTransformTrackedDeviceRelative() for wrist anchors
-    // (ETrackedControllerRole LeftHand/RightHand + watch-face tilt), or
-    // SetOverlayTransformTrackedDeviceRelative(HMD) for head/chest presets:
-    //   head:  (0.0, 0.0, -0.6)
-    //   chest: (0.0, -0.40, -0.50) tilted up ~-20deg
-    // plus SetOverlayWidthInMeters(width_m).
+    if (!native_available || !native_overlay || !scene_overlay_handle) return;
+    auto cfg = settings->vr_overlay_config;
+    auto anchor = (VRToastAnchor)cfg.anchor;
+
+    gbe_vr::TrackedDeviceIndex_t dev = gbe_vr::k_HmdIndex;
+    if ((anchor == VRToastAnchor::left_wrist || anchor == VRToastAnchor::right_wrist) && native_system) {
+        auto role = (anchor == VRToastAnchor::left_wrist)
+            ? gbe_vr::ControllerRole_LeftHand : gbe_vr::ControllerRole_RightHand;
+        gbe_vr::TrackedDeviceIndex_t idx = native_system->GetTrackedDeviceIndexForControllerRole(role);
+        if (idx != gbe_vr::k_InvalidDeviceIndex) {
+            dev = idx;
+        } else if (!cfg.fallback_to_head) {
+            PRINT_DEBUG("wrist controller untracked and no fallback, skipping native toast");
+            return;
+        }
+        // else: fall through with HMD device (head fallback)
+    }
+
+    auto mat = build_anchor_matrix(anchor, cfg.offset_x, cfg.offset_y, cfg.offset_z, cfg.tilt_deg);
+    auto scene = (gbe_vr::VROverlayHandle_t)scene_overlay_handle;
+    native_overlay->SetOverlayTransformTrackedDeviceRelative(scene, dev, &mat);
+    native_overlay->SetOverlayWidthInMeters(scene, cfg.width_m);
+}
+
+void VROverlayBridge::show_native_toast(const std::string &png_path)
+{
+    if (png_path.empty()) return;
+    if (!native_available && !init_native()) return;
+    if (!native_overlay || !scene_overlay_handle) return;
+    if ((VRToastAnchor)settings->vr_overlay_config.anchor == VRToastAnchor::dashboard_only) {
+        // Dashboard-only: refresh the tab thumbnail so the menu shows latest.
+        if (dashboard_thumb_handle)
+            native_overlay->SetOverlayFromFile((gbe_vr::VROverlayHandle_t)dashboard_thumb_handle, png_path.c_str());
+        return;
+    }
+    auto scene = (gbe_vr::VROverlayHandle_t)scene_overlay_handle;
+    if (native_overlay->SetOverlayFromFile(scene, png_path.c_str()) != gbe_vr::VROverlayError_None) {
+        PRINT_DEBUG("SetOverlayFromFile failed");
+        return;
+    }
+    apply_anchor_transform();
+    if (native_overlay->ShowOverlay(scene) != gbe_vr::VROverlayError_None) {
+        PRINT_DEBUG("ShowOverlay failed");
+        return;
+    }
+    // Dashboard thumbnail mirrors the latest toast.
+    if (dashboard_thumb_handle)
+        native_overlay->SetOverlayFromFile((gbe_vr::VROverlayHandle_t)dashboard_thumb_handle, png_path.c_str());
+    scene_visible = true;
+    auto ms = (int)(toast_duration_sec() * 1000.0f);
+    scene_visible_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+    PRINT_DEBUG("native toast shown (%s)", png_path.c_str());
+}
+
+void VROverlayBridge::hide_native_scene()
+{
+    if (native_overlay && scene_visible && scene_overlay_handle) {
+        native_overlay->HideOverlay((gbe_vr::VROverlayHandle_t)scene_overlay_handle);
+    }
+    scene_visible = false;
 }
 
 void VROverlayBridge::push_dashboard_history(const VRAchToast &toast)
@@ -247,8 +471,9 @@ static std::string json_escape(const std::string &s)
     return o;
 }
 
-void VROverlayBridge::write_companion_toast_file(const VRAchToast &toast)
+std::string VROverlayBridge::write_companion_toast_file(const VRAchToast &toast)
 {
+    std::string png_str;
     try {
         auto tmp = std::filesystem::temp_directory_path();
         auto json_path = tmp / "gbe_vr_achievement_toast.json";
@@ -258,9 +483,9 @@ void VROverlayBridge::write_companion_toast_file(const VRAchToast &toast)
         float width = settings->vr_overlay_config.width_m;
 
         // Compose + write the toast PNG (icon + title + description + progress).
-        // This file is what SetOverlayFromFile (Phase 2b) and companion tools
-        // (OVR Toolkit / XSOverlay) display in-headset.
-        std::string png_str = png_path.string();
+        // Native path shows this file via SetOverlayFromFile; companion tools
+        // (OVR Toolkit / XSOverlay) can display it too.
+        png_str = png_path.string();
         {
             VRToastImageRequest req{};
             req.title = toast.title;
@@ -276,11 +501,14 @@ void VROverlayBridge::write_companion_toast_file(const VRAchToast &toast)
             if (ComposeVRToastImage(req, img) && EncodeVRToastPNG(img, png) && !png.empty()) {
                 std::ofstream pf(png_path, std::ios::binary | std::ios::trunc);
                 if (pf) pf.write(reinterpret_cast<const char *>(png.data()), (std::streamsize)png.size());
+                else png_str.clear();
+            } else {
+                png_str.clear();
             }
         }
 
         std::ofstream f(json_path, std::ios::trunc);
-        if (!f) return;
+        if (!f) return png_str;
         f << "{"
           << "\"name\":\"" << json_escape(toast.name) << "\","
           << "\"title\":\"" << json_escape(toast.title) << "\","
@@ -312,6 +540,7 @@ void VROverlayBridge::write_companion_toast_file(const VRAchToast &toast)
     } catch (...) {
         // best-effort only
     }
+    return png_str;
 }
 
 void VROverlayBridge::QueueToast(const VRAchToast &toast_in)
@@ -340,6 +569,10 @@ void VROverlayBridge::QueueToast(const VRAchToast &toast_in)
 void VROverlayBridge::ProcessQueue()
 {
     std::lock_guard<std::recursive_mutex> lock(vr_mutex);
+    // Auto-hide the native scene toast when its duration elapses, even with
+    // nothing else queued.
+    if (scene_visible && std::chrono::steady_clock::now() >= scene_visible_until)
+        hide_native_scene();
     if (vr_queue.empty()) return;
     if (!settings || !settings->vr_overlay_config.enable_vr_overlay) {
         vr_queue.clear();
@@ -356,16 +589,13 @@ void VROverlayBridge::ProcessQueue()
         // Dashboard history always records (dashboard_only mode included).
         push_dashboard_history(t);
 
-        if (settings->vr_overlay_config.anchor != VRToastAnchor::dashboard_only) {
+        // Companion PNG+JSON always written (native path + external tools).
+        std::string png = write_companion_toast_file(t);
+        // Native path: show the PNG in-headset, or refresh the dashboard
+        // thumbnail in dashboard_only mode (no-op without SteamVR).
+        if (!png.empty()) {
             ensure_overlays();
-            apply_anchor_transform();
-            // Phase 2: paint title+description+icon into overlay texture and
-            // ShowOverlay() for duration_sec. Phase 1: companion file.
-            write_companion_toast_file(t);
-        } else {
-            // dashboard_only: still write companion file so external overlays
-            // (XSOverlay/OVR Toolkit) can mirror if the user wants.
-            write_companion_toast_file(t);
+            show_native_toast(png);
         }
 
         PRINT_DEBUG("VR toast shown '%s'", t.name.c_str());

@@ -13,6 +13,7 @@
 // - Sound still plays through the existing desktop path (audible via SteamVR mirroring).
 
 #include "dll/base.h"
+#include "overlay/vr_openvr_abi.h"
 #include <string>
 #include <deque>
 #include <chrono>
@@ -73,11 +74,22 @@ class VROverlayBridge {
 
     void *openvr_module = nullptr; // dynamic handle, never linked statically
 
+    // Native SteamVR handles (resolved via VR_GetGenericInterface, see
+    // vr_openvr_abi.h for the pinned vtable layout). Null unless a current
+    // SteamVR runtime answered with the exact expected interface versions.
+    gbe_vr::IVROverlay_028 *native_overlay = nullptr;
+    gbe_vr::IVRSystem_026 *native_system = nullptr;
+    bool native_available = false;
+
     // Scene toast overlay + dashboard tab handles (opaque, only valid if runtime_available).
     // We keep them as uint64 to avoid including openvr headers.
     uint64_t scene_overlay_handle = 0;
     uint64_t dashboard_overlay_handle = 0;
+    uint64_t dashboard_thumb_handle = 0;
     bool overlays_created = false;
+    // When the scene toast must auto-hide (steady_clock).
+    std::chrono::steady_clock::time_point scene_visible_until{};
+    bool scene_visible = false;
 
     std::deque<VRAchToast> vr_queue{};
     std::chrono::milliseconds last_scheduled_show_time{};
@@ -96,10 +108,22 @@ class VROverlayBridge {
     bool ensure_overlays();        // CreateOverlay + CreateDashboardOverlay (once)
     void apply_anchor_transform(); // SetOverlayTransform* per current anchor/size/offset
     void push_dashboard_history(const VRAchToast &toast);
-    // Writes %TEMP%/gbe_vr_achievement_toast.json (+ .png icon path when available)
-    // so companion tools (OVR Toolkit/XSOverlay) can display even before native
-    // IVROverlay texture upload lands. Best-effort, never fails the queue.
-    void write_companion_toast_file(const VRAchToast &toast);
+    // Native SteamVR path (2b): resolve IVROverlay_028/IVRSystem_026 via
+    // VR_GetGenericInterface, Find/Create scene + dashboard overlays.
+    // Returns true when native toasts can be shown. Lock must be held.
+    bool init_native();
+    // Hide + destroy native overlays. Never calls VR_Shutdown (game owns VR).
+    void shutdown_native();
+    // Show the composed toast PNG in-headset at the configured anchor.
+    void show_native_toast(const std::string &png_path);
+    void hide_native_scene();
+    float toast_duration_sec() const;
+    // Writes %TEMP%/gbe_vr_achievement_toast.json (+ .png toast image,
+    // + gbe_vr_dashboard.json history snapshot) so companion tools
+    // (OVR Toolkit/XSOverlay) can display even when native IVROverlay is
+    // unavailable. Returns the toast PNG path (empty on failure).
+    // Best-effort, never fails the queue.
+    std::string write_companion_toast_file(const VRAchToast &toast);
 
 public:
     explicit VROverlayBridge(class Settings *settings);
