@@ -17,6 +17,7 @@
 
 #include "dll/dll.h"
 #include "dll/steam_utils.h"
+#include <cstdlib>
 
 
 Steam_Utils::Steam_Utils(Settings *settings, class SteamCallResults *callback_results, class SteamCallBacks *callbacks, Steam_Overlay *overlay):
@@ -309,8 +310,22 @@ const char* Steam_Utils::GetSteamUILanguage()
 // returns true if Steam itself is running in VR mode
 bool Steam_Utils::IsSteamRunningInVR()
 {
-    PRINT_DEBUG_TODO();
+    PRINT_DEBUG_ENTRY();
     std::lock_guard<std::recursive_mutex> lock(global_mutex);
+    const char *disabled = std::getenv("GBE_DISABLE_VR");
+    if (disabled && disabled[0] == '1' && disabled[1] == '\0') return false;
+    // Mirror the flat VR probe: explicit VR session hints mean "in VR".
+    // Full openvr_api HMD query lives in VR_IsHmdPresent (dll.cpp) and the
+    // VROverlayBridge probe; games polling this get a consistent answer.
+    const char *xr = std::getenv("XR_RUNTIME_JSON");
+    const char *sv = std::getenv("STEAMVR_RUNNING");
+    const char *vr = std::getenv("VR_RUNNING");
+    if ((xr && *xr) || (sv && sv[0] == '1' && sv[1] == '\0') || (vr && vr[0] == '1' && vr[1] == '\0')) return true;
+    if (settings && settings->vr_overlay_config.enable_vr_overlay) {
+        // If the user force-enabled VR toasts but no runtime hints exist yet,
+        // still report false here: this API means "SteamVR compositor session",
+        // not "toasts enabled". The bridge activates lazily on first probe.
+    }
     return false;
 }
 

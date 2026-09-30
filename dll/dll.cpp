@@ -20,6 +20,7 @@
 #include "dll/settings_parser.h"
 #include "dll/client_known_interfaces.h"
 #include "dll/capicmcallback.h"
+#include <cstdlib>
 
 
 // https://github.com/ValveSoftware/source-sdk-2013/blob/a36ead80b3ede9f269314c08edd3ecc23de4b160/src/public/steam/steam_api_internal.h#L30-L32
@@ -1477,7 +1478,46 @@ STEAMAPI_API const char *VR_GetStringForHmdError( int error )
 
 STEAMAPI_API steam_bool VR_IsHmdPresent()
 {
-    PRINT_DEBUG_TODO();
+    PRINT_DEBUG_ENTRY();
+    // Phase 1 VR presence: dynamic probe of the real SteamVR client library.
+    // No static OpenVR link; flat games without SteamVR cost ~nothing.
+    // GBE_DISABLE_VR=1 forces false.
+    const char *disabled = std::getenv("GBE_DISABLE_VR");
+    if (disabled && disabled[0] == '1' && disabled[1] == '\0') return false;
+#ifdef __WINDOWS__
+    HMODULE mod = LoadLibraryA("openvr_api.dll");
+    if (mod) {
+        using fn_t = uint8_t (__cdecl *)(void);
+        fn_t fn = (fn_t)GetProcAddress(mod, "VR_IsHmdPresent");
+        steam_bool present = false;
+        if (fn) {
+            present = fn() ? true : false;
+        } else {
+            // Library exists but export missing: assume a VR-capable setup,
+            // true presence is resolved later by the compositor (Phase 2).
+            present = true;
+        }
+        FreeLibrary(mod);
+        if (present) return true;
+    }
+#else
+    void *mod = dlopen("libopenvr_api.so", RTLD_NOW | RTLD_LOCAL);
+    if (!mod) mod = dlopen("libopenvr_api.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (mod) {
+        using fn_t = uint8_t (*)(void);
+        fn_t fn = (fn_t)dlsym(mod, "VR_IsHmdPresent");
+        steam_bool present = false;
+        if (fn) present = fn() ? true : false;
+        else present = true;
+        dlclose(mod);
+        if (present) return true;
+    }
+#endif
+    // Env hints for VR sessions where the client lib isn't on PATH.
+    const char *xr = std::getenv("XR_RUNTIME_JSON");
+    const char *sv = std::getenv("STEAMVR_RUNNING");
+    const char *vr = std::getenv("VR_RUNNING");
+    if ((xr && *xr) || (sv && sv[0] == '1' && sv[1] == '\0') || (vr && vr[0] == '1' && vr[1] == '\0')) return true;
     return false;
 }
 

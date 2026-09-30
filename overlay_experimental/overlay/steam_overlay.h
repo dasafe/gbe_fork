@@ -15,6 +15,7 @@
 #include "InGameOverlay/RendererHook.h"
 #include "InGameOverlay/ImGui/imgui.h"
 #include "overlay/steam_overlay_stats.h"
+#include "overlay/vr_overlay.h"
 
 static constexpr size_t max_chat_len = 768;
 
@@ -177,6 +178,11 @@ class Steam_Overlay
     };
     std::deque<ScheduledAchievement> achievement_queue{};
     std::chrono::milliseconds last_scheduled_show_time{}; // tracks the last scheduled show time for spacing
+
+    // VR achievement path (HMD toasts + dashboard tab). Null when EMU_OVERLAY off.
+    std::unique_ptr<VROverlayBridge> vr_bridge{};
+    bool IsVRActive();
+    void process_vr_queue();
 
     bool overlay_state_changed = false;
 

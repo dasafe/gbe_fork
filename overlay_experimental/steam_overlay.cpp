@@ -859,6 +859,18 @@ void Steam_Overlay::show_test_achievement()
     }
 
     post_achievement_notification(ach, for_progress);
+    // Mirror test toast to HMD when VR is active (Toast Setup preview path).
+    if (IsVRActive() && vr_bridge) {
+        VRAchToast toast{};
+        toast.name = "gbe_test_achievement";
+        toast.title = ach.title;
+        toast.description = ach.description;
+        toast.progress = ach.progress;
+        toast.max_progress = ach.max_progress;
+        toast.achieved = ach.achieved;
+        toast.for_progress = for_progress;
+        vr_bridge->QueueToast(toast);
+    }
     // sound is now played when notification is actually shown (delayed with queue)
 }
 
@@ -1683,6 +1695,26 @@ void Steam_Overlay::post_achievement_notification(Overlay_Achievement &ach, bool
     PRINT_DEBUG_ENTRY();
     std::lock_guard<std::recursive_mutex> lock(overlay_mutex);
     if (!Ready()) return;
+
+    // VR path: HMD-exclusive toasts (no desktop mirror) when a VR session is
+    // active and suppression is enabled. Sound still plays via SteamVR mirroring.
+    // HMD detection is lazy/dynamic (no static OpenVR link).
+    if (IsVRActive() && vr_bridge && vr_bridge->ShouldSuppressDesktopToast()) {
+        VRAchToast toast{};
+        toast.name = ach.name;
+        toast.title = ach.title;
+        toast.description = ach.description;
+        toast.progress = ach.progress;
+        toast.max_progress = ach.max_progress;
+        toast.achieved = ach.achieved;
+        toast.for_progress = for_progress;
+        toast.unlock_time = ach.unlock_time;
+        vr_bridge->QueueToast(toast);
+        // Sound stays on: audible in HMD via SteamVR audio mirroring.
+        notify_sound_user_achievement();
+        PRINT_DEBUG("Achievement routed to VR HMD: '%s'", ach.name.c_str());
+        return;
+    }
 // Get current time
     auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch());
 
@@ -1765,6 +1797,18 @@ void Steam_Overlay::process_achievement_queue()
 
 }
 
+bool Steam_Overlay::IsVRActive()
+{
+    if (!settings || !settings->vr_overlay_config.enable_vr_overlay) return false;
+    if (!vr_bridge) return false;
+    return vr_bridge->IsActive();
+}
+
+void Steam_Overlay::process_vr_queue()
+{
+    if (vr_bridge) vr_bridge->ProcessQueue();
+}
+
 bool Steam_Overlay::try_load_ach_icon(Overlay_Achievement &ach, bool achieved, bool upload_new_icon_to_gpu)
 {
     if (!_renderer) return false;
@@ -1802,6 +1846,8 @@ void Steam_Overlay::overlay_render_proc()
 
     // Process achievement queue to show scheduled notifications
     process_achievement_queue();
+    // Parallel VR queue (HMD toasts + dashboard history). No-op when VR inactive.
+    process_vr_queue();
 
     // Check for pending game update notification
     if (settings->pending_update_available) {
@@ -2613,6 +2659,10 @@ void Steam_Overlay::SetupOverlay()
 
     bool not_called_yet = false;
     if (setup_overlay_called.compare_exchange_weak(not_called_yet, true)) {
+        if (!vr_bridge) {
+            vr_bridge = std::make_unique<VROverlayBridge>(settings);
+            vr_bridge->Setup();
+        }
         if (settings->overlay_hook_delay_sec > 0) {
             PRINT_DEBUG("waiting %i seconds", settings->overlay_hook_delay_sec);
             renderer_detector_delay_thread.start();
@@ -2636,6 +2686,11 @@ void Steam_Overlay::UnSetupOverlay()
     bool already_called = true;
     if (setup_overlay_called.compare_exchange_weak(already_called, false)) {
         is_ready = false;
+
+        if (vr_bridge) {
+            vr_bridge->Shutdown();
+            vr_bridge.reset();
+        }
 
         renderer_hook_init_thread.kill();
         renderer_detector_delay_thread.kill();

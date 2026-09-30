@@ -1735,6 +1735,61 @@ static void parse_overlay_general_config(class Settings *settings_client, class 
 
 }
 
+// overlay::vr -- HMD achievement toasts + dashboard tab
+static int parse_vr_anchor(const std::string &s, int fallback)
+{
+    std::string v = s;
+    for (auto &c : v) c = (char)::tolower((unsigned char)c);
+    if (v == "left_wrist" || v == "left" || v == "0") return 0;
+    if (v == "right_wrist" || v == "right" || v == "1") return 1;
+    if (v == "head" || v == "hmd" || v == "2") return 2;
+    if (v == "chest" || v == "knee-chest" || v == "knee_chest" || v == "body" || v == "3") return 3;
+    if (v == "dashboard_only" || v == "dashboard" || v == "none" || v == "4") return 4;
+    return fallback;
+}
+
+static void parse_overlay_vr_config(class Settings *settings_client, class Settings *settings_server)
+{
+    settings_client->vr_overlay_config.enable_vr_overlay = ini.GetBoolValue("overlay::vr", "enable_vr_overlay", settings_client->vr_overlay_config.enable_vr_overlay);
+    settings_server->vr_overlay_config.enable_vr_overlay = ini.GetBoolValue("overlay::vr", "enable_vr_overlay", settings_server->vr_overlay_config.enable_vr_overlay);
+
+    {
+        std::string a = ini.GetValue("overlay::vr", "vr_anchor", "");
+        if (!a.empty()) {
+            int anchor = parse_vr_anchor(a, settings_client->vr_overlay_config.anchor);
+            settings_client->vr_overlay_config.anchor = anchor;
+            settings_server->vr_overlay_config.anchor = anchor;
+        }
+    }
+
+    {
+        double w = ini.GetDoubleValue("overlay::vr", "vr_width_m", settings_client->vr_overlay_config.width_m);
+        if (w >= 0.08 && w <= 0.30) {
+            settings_client->vr_overlay_config.width_m = (float)w;
+            settings_server->vr_overlay_config.width_m = (float)w;
+        }
+    }
+
+    settings_client->vr_overlay_config.offset_x = (float)ini.GetDoubleValue("overlay::vr", "vr_offset_x", settings_client->vr_overlay_config.offset_x);
+    settings_server->vr_overlay_config.offset_x = settings_client->vr_overlay_config.offset_x;
+    settings_client->vr_overlay_config.offset_y = (float)ini.GetDoubleValue("overlay::vr", "vr_offset_y", settings_client->vr_overlay_config.offset_y);
+    settings_server->vr_overlay_config.offset_y = settings_client->vr_overlay_config.offset_y;
+    settings_client->vr_overlay_config.offset_z = (float)ini.GetDoubleValue("overlay::vr", "vr_offset_z", settings_client->vr_overlay_config.offset_z);
+    settings_server->vr_overlay_config.offset_z = settings_client->vr_overlay_config.offset_z;
+
+    settings_client->vr_overlay_config.tilt_deg = (float)ini.GetDoubleValue("overlay::vr", "vr_tilt_deg", settings_client->vr_overlay_config.tilt_deg);
+    settings_server->vr_overlay_config.tilt_deg = settings_client->vr_overlay_config.tilt_deg;
+
+    settings_client->vr_overlay_config.duration_sec = (float)ini.GetDoubleValue("overlay::vr", "vr_duration_sec", settings_client->vr_overlay_config.duration_sec);
+    settings_server->vr_overlay_config.duration_sec = settings_client->vr_overlay_config.duration_sec;
+
+    settings_client->vr_overlay_config.suppress_desktop_achievements = ini.GetBoolValue("overlay::vr", "vr_suppress_desktop_achievements", settings_client->vr_overlay_config.suppress_desktop_achievements);
+    settings_server->vr_overlay_config.suppress_desktop_achievements = ini.GetBoolValue("overlay::vr", "vr_suppress_desktop_achievements", settings_server->vr_overlay_config.suppress_desktop_achievements);
+
+    settings_client->vr_overlay_config.fallback_to_head = ini.GetBoolValue("overlay::vr", "vr_fallback_to_head", settings_client->vr_overlay_config.fallback_to_head);
+    settings_server->vr_overlay_config.fallback_to_head = ini.GetBoolValue("overlay::vr", "vr_fallback_to_head", settings_server->vr_overlay_config.fallback_to_head);
+}
+
 // main::misc::steam_game_stats_reports_dir
 static void parse_steam_game_stats_reports_dir(class Settings *settings_client, class Settings *settings_server)
 {
@@ -2156,6 +2211,7 @@ uint32 create_localstorage_settings(Settings **settings_client_out, Settings **s
     }
 
     parse_overlay_general_config(settings_client, settings_server);
+    parse_overlay_vr_config(settings_client, settings_server);
     parse_overlay_hotkeys(settings_client, settings_server);
     load_overlay_appearance(settings_client, settings_server, local_storage);
     parse_steam_game_stats_reports_dir(settings_client, settings_server);

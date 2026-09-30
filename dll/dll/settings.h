@@ -203,6 +203,21 @@ struct Overlay_Appearance {
     static NotificationPosition translate_notification_position(const std::string &str);
 };
 
+// VR achievement toast placement (mirrors [overlay::vr] in configs.overlay.ini).
+// 0=left_wrist, 1=right_wrist, 2=head, 3=chest (knee-chest), 4=dashboard_only
+struct VROverlay_Config {
+    bool enable_vr_overlay = true;
+    int anchor = 0;
+    float width_m = 0.16f;
+    float offset_x = 0.0f;
+    float offset_y = 0.04f;
+    float offset_z = 0.0f;
+    float tilt_deg = 45.0f;
+    float duration_sec = -1.0f; // <=0 reuses desktop Notification_Duration_Achievement
+    bool suppress_desktop_achievements = true; // HMD-exclusive toasts in VR
+    bool fallback_to_head = true;
+};
+
 struct Branch_Info {
     std::string name{};
     std::string description{};
@@ -409,6 +424,9 @@ public:
     std::vector<std::string> overlay_screenshot_keys{};
     // minimum time interval between achievement notifications (in milliseconds)
     int achievement_notification_delay_ms = 0;
+
+    // VR achievement overlay (HMD toasts + dashboard tab)
+    VROverlay_Config vr_overlay_config{};
 
     // game update check via SteamDB RSS
     bool check_for_game_updates = false;
