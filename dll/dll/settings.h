@@ -208,14 +208,15 @@ struct Overlay_Appearance {
 struct VROverlay_Config {
     bool enable_vr_overlay = true;
     int anchor = 0;
-    float width_m = 0.16f;
+    float width_m = 0.22f;
     float offset_x = 0.0f;
-    float offset_y = 0.04f;
+    float offset_y = 0.06f;
     float offset_z = 0.0f;
     float tilt_deg = 45.0f;
     float duration_sec = -1.0f; // <=0 reuses desktop Notification_Duration_Achievement
     bool suppress_desktop_achievements = true; // HMD-exclusive toasts in VR
     bool fallback_to_head = true;
+    bool flip_image_y = false; // escape hatch if a runtime shows file images upside-down
 };
 
 struct Branch_Info {

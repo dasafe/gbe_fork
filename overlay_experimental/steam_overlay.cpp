@@ -579,6 +579,7 @@ void Steam_Overlay::load_achievements_data()
     }
 
     PRINT_DEBUG("count=%u, loaded=%zu", achievements_num, achievements.size());
+    vr_dashboard_list_dirty = true;
 
 }
 
@@ -1687,6 +1688,7 @@ void Steam_Overlay::post_achievement_notification(Overlay_Achievement &ach, bool
     PRINT_DEBUG_ENTRY();
     std::lock_guard<std::recursive_mutex> lock(overlay_mutex);
     if (!Ready()) return;
+    vr_dashboard_list_dirty = true; // achievement state changed -> refresh VR tab
 
     // VR path: HMD-exclusive toasts (no desktop mirror) when a VR session is
     // active and suppression is enabled. Sound still plays via SteamVR mirroring.
@@ -1812,6 +1814,60 @@ void Steam_Overlay::process_vr_queue()
     if (vr_bridge) vr_bridge->ProcessQueue();
 }
 
+// Feed the VR dashboard tab: same ordering as the flat achievements window
+// (unlocked by time desc, locked by global percentage desc). Hidden locked
+// achievements resolve to the localized placeholder, like the flat list.
+void Steam_Overlay::push_vr_dashboard_list()
+{
+    if (!vr_bridge) return;
+    std::vector<VRDashboardEntry> entries;
+    entries.reserve(achievements.size());
+    size_t unlocked_count = 0;
+
+    std::vector<size_t> unlocked_idx, locked_idx;
+    unlocked_idx.reserve(achievements.size());
+    locked_idx.reserve(achievements.size());
+    for (size_t i = 0; i < achievements.size(); ++i) {
+        if (achievements[i].achieved) { unlocked_idx.push_back(i); ++unlocked_count; }
+        else locked_idx.push_back(i);
+    }
+    std::sort(unlocked_idx.begin(), unlocked_idx.end(),
+        [this](size_t a, size_t b) { return achievements[a].unlock_time > achievements[b].unlock_time; });
+    std::sort(locked_idx.begin(), locked_idx.end(),
+        [this](size_t a, size_t b) {
+            float pct_a = achievements[a].unlock_percentage;
+            float pct_b = achievements[b].unlock_percentage;
+            if (pct_a < 0.0f && pct_b < 0.0f) return false;
+            if (pct_a < 0.0f) return false;
+            if (pct_b < 0.0f) return true;
+            return pct_a > pct_b;
+        });
+
+    auto append = [this, &entries](size_t i) {
+        auto &x = achievements[i];
+        VRDashboardEntry e{};
+        bool hidden = x.hidden && !x.achieved;
+        e.title = hidden ? translationHiddenAchievement[current_language] : x.title;
+        e.description = hidden ? "" : x.description;
+        e.achieved = x.achieved;
+        if (x.unlock_percentage >= 0.0f) {
+            float pct = x.unlock_percentage < 0.1f ? 0.1f : x.unlock_percentage;
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%.1f%%", pct);
+            e.detail = buf;
+            e.rare = x.achieved && x.unlock_percentage <= 10.0f;
+        }
+        entries.push_back(std::move(e));
+    };
+    for (size_t i : unlocked_idx) append(i);
+    for (size_t i : locked_idx) append(i);
+
+    char header[96];
+    snprintf(header, sizeof(header), "GSE Achievements (%zu/%zu)",
+             unlocked_count, achievements.size());
+    vr_bridge->PushAchievementList(std::move(entries), header);
+}
+
 bool Steam_Overlay::try_load_ach_icon(Overlay_Achievement &ach, bool achieved, bool upload_new_icon_to_gpu)
 {
     if (!_renderer) return false;
@@ -1851,6 +1907,11 @@ void Steam_Overlay::overlay_render_proc()
     process_achievement_queue();
     // Parallel VR queue (HMD toasts + dashboard history). No-op when VR inactive.
     process_vr_queue();
+    // Push the full achievements list to the VR dashboard tab when it changed.
+    if (vr_bridge && vr_dashboard_list_dirty) {
+        push_vr_dashboard_list();
+        vr_dashboard_list_dirty = false;
+    }
 
     // Check for pending game update notification
     if (settings->pending_update_available) {
@@ -2580,6 +2641,9 @@ void Steam_Overlay::render_main_window()
                     ImGui::SliderFloat("VR toast duration (s, <=0 auto)", &settings->vr_overlay_config.duration_sec, -1.0f, 15.0f);
                     ImGui::Checkbox("Suppress desktop achievement toast in VR", &settings->vr_overlay_config.suppress_desktop_achievements);
                     ImGui::Checkbox("Fall back to head if wrist untracked", &settings->vr_overlay_config.fallback_to_head);
+                    if (ImGui::Checkbox("Flip VR toast image vertically", &settings->vr_overlay_config.flip_image_y)) {
+                        vr_dashboard_list_dirty = true; // dashboard uses the same composer path
+                    }
                     if (ImGui::Button("Test VR toast")) {
                         if (vr_bridge) vr_bridge->ShowTestToast();
                         else show_test_achievement();

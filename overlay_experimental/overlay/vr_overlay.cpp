@@ -335,12 +335,18 @@ bool VROverlayBridge::ensure_overlays()
         return false;
     }
     overlays_created = true;
+    // Tab is visible from the start: upload the current achievements list
+    // (possibly the "no data yet" panel) right away.
+    refresh_dashboard_texture();
     return true;
 }
 
 // Build the device-relative transform for the current anchor preset.
-// OpenVR: +y up, overlay plane faces +z. Wrist watch-face tips up toward the
-// eyes by tilt_deg; head floats ahead; chest sits low and tips up.
+// OpenVR: +y up, overlay plane faces +z. Wrist presets lay the toast flat
+// like a watch dial on the back of the wrist: a 25 deg lay-flat base tips
+// the normal up/out of the wrist, tilt_deg fine-tunes toward the eyes, so
+// text reads wrist -> fingers during a watch glance. Head floats ahead;
+// chest sits low and tips up.
 static gbe_vr::HmdMatrix34_t build_anchor_matrix(VRToastAnchor anchor, float ox, float oy, float oz, float tilt_deg)
 {
     const float pi = 3.14159265358979323846f;
@@ -358,9 +364,13 @@ static gbe_vr::HmdMatrix34_t build_anchor_matrix(VRToastAnchor anchor, float ox,
             break;
         case VRToastAnchor::left_wrist:
         case VRToastAnchor::right_wrist:
+            // Watch-face: lay flat toward the wrist-back so the face only
+            // becomes readable during a watch glance (text wrist -> fingers).
+            tilt = -(tilt_deg + 25.0f) * pi / 180.0f;
+            break;
         case VRToastAnchor::dashboard_only:
         default:
-            break; // wrist: user offset + tilt as configured
+            break; // user offset + tilt as configured
     }
 
     float c = cosf(tilt), s = sinf(tilt);
@@ -496,6 +506,7 @@ std::string VROverlayBridge::write_companion_toast_file(const VRAchToast &toast)
             req.max_progress = toast.max_progress;
             req.for_progress = toast.for_progress;
             req.rare = toast.rare;
+            req.flip_y = settings->vr_overlay_config.flip_image_y;
             VRToastImage img{};
             std::vector<uint8_t> png{};
             if (ComposeVRToastImage(req, img) && EncodeVRToastPNG(img, png) && !png.empty()) {
@@ -573,7 +584,15 @@ void VROverlayBridge::ProcessQueue()
     // nothing else queued.
     if (scene_visible && std::chrono::steady_clock::now() >= scene_visible_until)
         hide_native_scene();
-    if (vr_queue.empty()) return;
+    // Eager tab: create overlays as soon as an HMD session is present, even
+    // with nothing queued, so the dashboard tab exists from game start.
+    if (vr_queue.empty()) {
+        if (!overlays_created && settings && settings->vr_overlay_config.enable_vr_overlay) {
+            probe_runtime();
+            if (runtime_available) ensure_overlays();
+        }
+        return;
+    }
     if (!settings || !settings->vr_overlay_config.enable_vr_overlay) {
         vr_queue.clear();
         return;
@@ -612,6 +631,42 @@ void VROverlayBridge::ShowTestToast()
     t.achieved = true;
     t.for_progress = false;
     QueueToast(t);
+}
+
+void VROverlayBridge::PushAchievementList(std::vector<VRDashboardEntry> entries, const std::string &header)
+{
+    std::lock_guard<std::recursive_mutex> lock(vr_mutex);
+    dashboard_entries = std::move(entries);
+    if (!header.empty()) dashboard_header = header;
+    if (overlays_created) refresh_dashboard_texture();
+}
+
+void VROverlayBridge::refresh_dashboard_texture()
+{
+    // Lock is held by callers (ensure_overlays / PushAchievementList).
+    if (!native_available || !native_overlay || !dashboard_overlay_handle) return;
+    try {
+        auto tmp = std::filesystem::temp_directory_path();
+        auto png_path = tmp / "gbe_vr_dashboard.png";
+        VRDashboardImage img{};
+        std::vector<uint8_t> png{};
+        if (ComposeVRDashboardImage(dashboard_entries, dashboard_header, img,
+                                    settings && settings->vr_overlay_config.flip_image_y) &&
+            EncodeVRDashboardPNG(img, png) && !png.empty()) {
+            std::ofstream pf(png_path, std::ios::binary | std::ios::trunc);
+            if (!pf) return;
+            pf.write(reinterpret_cast<const char *>(png.data()), (std::streamsize)png.size());
+            pf.close();
+            if (native_overlay->SetOverlayFromFile(
+                    (gbe_vr::VROverlayHandle_t)dashboard_overlay_handle,
+                    png_path.string().c_str()) != gbe_vr::VROverlayError_None) {
+                PRINT_DEBUG("dashboard texture upload failed");
+            }
+        }
+    } catch (const std::exception &e) {
+        PRINT_DEBUG("dashboard texture failed: %s", e.what());
+    } catch (...) {
+    }
 }
 
 size_t VROverlayBridge::DashboardHistorySize() const

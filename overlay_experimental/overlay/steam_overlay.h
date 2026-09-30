@@ -183,6 +183,9 @@ class Steam_Overlay
     std::unique_ptr<VROverlayBridge> vr_bridge{};
     bool IsVRActive();
     void process_vr_queue();
+    // Dashboard tab list feed (mirrors the flat achievements window).
+    bool vr_dashboard_list_dirty = true; // first render tick pushes (possibly empty) list
+    void push_vr_dashboard_list();
 
     bool overlay_state_changed = false;
 

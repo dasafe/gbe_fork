@@ -16,6 +16,7 @@
 #include "overlay/vr_openvr_abi.h"
 #include <string>
 #include <deque>
+#include <vector>
 #include <chrono>
 #include <mutex>
 
@@ -34,14 +35,15 @@ enum class VRToastAnchor : uint8_t {
 struct VROverlayConfig {
     bool enable_vr_overlay = true;
     VRToastAnchor anchor = VRToastAnchor::left_wrist;
-    float width_m = 0.16f;          // 0.08 - 0.30
+    float width_m = 0.22f;          // 0.08 - 0.30, readable at arm's length
     float offset_x = 0.0f;          // meters, anchor-local nudge
-    float offset_y = 0.04f;
+    float offset_y = 0.06f;         // floats the watch-face above the wrist
     float offset_z = 0.0f;
-    float tilt_deg = 45.0f;         // wrist watch-face tilt
+    float tilt_deg = 45.0f;         // wrist watch-face fine-tune (on top of 25 deg lay-flat base)
     float duration_sec = -1.0f;     // <=0 reuses desktop Notification_Duration_Achievement
     bool suppress_desktop_achievements = true; // HMD-exclusive toasts in VR
     bool fallback_to_head = true;   // if wrist controller not tracked
+    bool flip_image_y = false;      // escape hatch if a runtime shows file images upside-down
 
     static VRToastAnchor anchor_from_string(const std::string &s);
     static std::string anchor_to_string(VRToastAnchor a);
@@ -104,6 +106,11 @@ class VROverlayBridge {
     std::deque<VRHistoryEntry> dashboard_history{};
     static constexpr size_t MAX_VR_HISTORY = 20;
 
+    // Full achievements snapshot for the dashboard tab texture (mirrors the
+    // flat achievements window: unlocked first, then locked).
+    std::vector<VRDashboardEntry> dashboard_entries{};
+    std::string dashboard_header{"GSE Achievements"};
+
     bool probe_runtime();          // dynamic-load openvr_api, detect HMD (cached)
     bool ensure_overlays();        // CreateOverlay + CreateDashboardOverlay (once)
     void apply_anchor_transform(); // SetOverlayTransform* per current anchor/size/offset
@@ -118,6 +125,9 @@ class VROverlayBridge {
     void show_native_toast(const std::string &png_path);
     void hide_native_scene();
     float toast_duration_sec() const;
+    // Re-compose + upload the dashboard tab texture from dashboard_entries.
+    // Lock must be held. No-op without native overlays.
+    void refresh_dashboard_texture();
     // Writes %TEMP%/gbe_vr_achievement_toast.json (+ .png toast image,
     // + gbe_vr_dashboard.json history snapshot) so companion tools
     // (OVR Toolkit/XSOverlay) can display even when native IVROverlay is
@@ -145,6 +155,10 @@ public:
     void QueueToast(const VRAchToast &toast);
     void ProcessQueue(); // called from overlay_render_proc()
     void ShowTestToast();
+
+    // Push the full achievements list for the dashboard tab (header example:
+    // "GSE Achievements (3/25)"). Refreshes the tab texture when live.
+    void PushAchievementList(std::vector<VRDashboardEntry> entries, const std::string &header);
 
     // Dashboard data access (rendered by Steam_Overlay dashboard hookup or
     // future native overlay texture painter).

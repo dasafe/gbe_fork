@@ -1788,6 +1788,9 @@ static void parse_overlay_vr_config(class Settings *settings_client, class Setti
 
     settings_client->vr_overlay_config.fallback_to_head = ini.GetBoolValue("overlay::vr", "vr_fallback_to_head", settings_client->vr_overlay_config.fallback_to_head);
     settings_server->vr_overlay_config.fallback_to_head = ini.GetBoolValue("overlay::vr", "vr_fallback_to_head", settings_server->vr_overlay_config.fallback_to_head);
+
+    settings_client->vr_overlay_config.flip_image_y = ini.GetBoolValue("overlay::vr", "vr_flip_y", settings_client->vr_overlay_config.flip_image_y);
+    settings_server->vr_overlay_config.flip_image_y = ini.GetBoolValue("overlay::vr", "vr_flip_y", settings_server->vr_overlay_config.flip_image_y);
 }
 
 // main::misc::steam_game_stats_reports_dir
