@@ -479,7 +479,7 @@ std::string VROverlayBridge::write_companion_toast_file(const VRAchToast &toast)
         auto json_path = tmp / "gbe_vr_achievement_toast.json";
         auto png_path = tmp / "gbe_vr_achievement_toast.png";
         auto dash_path = tmp / "gbe_vr_dashboard.json";
-        std::string anchor = VROverlayConfig::anchor_to_string(settings->vr_overlay_config.anchor);
+        std::string anchor = VROverlayConfig::anchor_to_string(static_cast<VRToastAnchor>(settings->vr_overlay_config.anchor));
         float width = settings->vr_overlay_config.width_m;
 
         // Compose + write the toast PNG (icon + title + description + progress).
@@ -563,7 +563,7 @@ void VROverlayBridge::QueueToast(const VRAchToast &toast_in)
     last_scheduled_show_time = t.scheduled_show_time;
     vr_queue.push_back(t);
     PRINT_DEBUG("VR toast queued '%s' anchor=%s", t.name.c_str(),
-        VROverlayConfig::anchor_to_string(settings->vr_overlay_config.anchor).c_str());
+        VROverlayConfig::anchor_to_string(static_cast<VRToastAnchor>(settings->vr_overlay_config.anchor)).c_str());
 }
 
 void VROverlayBridge::ProcessQueue()
@@ -634,7 +634,7 @@ bool VROverlayBridge::DashboardHistoryEntry(size_t idx, std::string &title, std:
 void VROverlayBridge::SetAnchor(VRToastAnchor a)
 {
     std::lock_guard<std::recursive_mutex> lock(vr_mutex);
-    if (settings) settings->vr_overlay_config.anchor = a;
+    if (settings) settings->vr_overlay_config.anchor = static_cast<int>(a);
     apply_anchor_transform();
 }
 
@@ -668,7 +668,7 @@ void VROverlayBridge::SetTilt(float deg)
 VRToastAnchor VROverlayBridge::GetAnchor() const
 {
     if (!settings) return VRToastAnchor::left_wrist;
-    return settings->vr_overlay_config.anchor;
+    return static_cast<VRToastAnchor>(settings->vr_overlay_config.anchor);
 }
 
 #endif // EMU_OVERLAY
