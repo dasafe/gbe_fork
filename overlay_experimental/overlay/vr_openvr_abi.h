@@ -36,6 +36,35 @@ typedef uint64_t VROverlayHandle_t;
 static const VROverlayHandle_t k_InvalidOverlayHandle = 0;
 
 struct HmdMatrix34_t { float m[3][4]; };
+struct HmdVector2_t { float v[2]; };
+
+enum EVROverlayInputMethod {
+    VROverlayInputMethod_None = 0,
+    VROverlayInputMethod_Mouse = 1, // tracked controllers get mouse events automatically
+};
+
+// Overlay mouse event ids (data is VREvent_Mouse_Compat_t).
+static const uint32_t k_VREvent_MouseMove = 300;
+static const uint32_t k_VREvent_MouseButtonDown = 301;
+static const uint32_t k_VREvent_MouseButtonUp = 302;
+static const uint32_t k_VRMouseButton_Left = 0x0001;
+
+// Minimal VREvent_t: header (12 bytes) + mouse payload at data offset.
+// Full VREvent_t is exactly 60 bytes (pack 8); only the mouse prefix is
+// ever read, other events are ignored by type id.
+struct VREvent_Mouse_Compat_t {
+    float x, y; // GL space: bottom-left of the texture is 0,0
+    uint32_t button; // EVRMouseButton bitmask
+    uint32_t cursor_index;
+};
+struct VREvent_Compat_t {
+    uint32_t event_type;
+    TrackedDeviceIndex_t tracked_device_index;
+    float event_age_seconds;
+    VREvent_Mouse_Compat_t mouse; // valid only for mouse events
+    uint8_t reserved[32]; // pad to the real 60-byte VREvent_t
+};
+static_assert(sizeof(VREvent_Compat_t) == 60, "VREvent_t size must match openvr.h");
 
 enum EVRInitError {
     VRInitError_None = 0,
@@ -85,7 +114,7 @@ public:
     virtual TrackedDeviceIndex_t GetTrackedDeviceIndexForControllerRole(ETrackedControllerRole role) = 0;
 };
 
-// --- IVROverlay_028 (real slots: 0,1,3,20,22,35,43,44,45,63,67) ------------
+// --- IVROverlay_028 (real slots: 0,1,3,20,22,35,43,44,45,48,50,52,63,67) ----
 
 class IVROverlay_028 {
 public:
@@ -146,11 +175,15 @@ public:
     virtual bool IsOverlayVisible(VROverlayHandle_t ulOverlayHandle) = 0;
     virtual void _pad46() = 0;
     virtual void _pad47() = 0;
-    virtual void _pad48() = 0;
+    // slot 48: fills *pEvent when the overlay has a queued event.
+    // uncbVREvent must be sizeof(VREvent_t) == 60.
+    virtual bool PollNextOverlayEvent(VROverlayHandle_t ulOverlayHandle, VREvent_Compat_t *pEvent, uint32_t uncbVREvent) = 0;
     virtual void _pad49() = 0;
-    virtual void _pad50() = 0;
+    // slot 50: dashboard overlays need Mouse so the laser becomes mouse events.
+    virtual EVROverlayError SetOverlayInputMethod(VROverlayHandle_t ulOverlayHandle, EVROverlayInputMethod eInputMethod) = 0;
     virtual void _pad51() = 0;
-    virtual void _pad52() = 0;
+    // slot 52: mouse coords are reported in these units (set to texture px).
+    virtual EVROverlayError SetOverlayMouseScale(VROverlayHandle_t ulOverlayHandle, const HmdVector2_t *pvecMouseScale) = 0;
     virtual void _pad53() = 0;
     virtual void _pad54() = 0;
     virtual void _pad55() = 0;

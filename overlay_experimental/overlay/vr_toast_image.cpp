@@ -290,16 +290,161 @@ bool ComposeVRToastImage(const VRToastImageRequest &req, VRToastImage &out)
     return true;
 }
 
-bool ComposeVRDashboardImage(const std::vector<VRDashboardEntry> &entries,
-                             const std::string &header,
-                             VRDashboardImage &out,
-                             bool flip_y)
+// --- Dashboard tab UI (views + software widgets) ---------------------------
+// Canvas coordinates: top-left origin, 1024x1024. Hit rects recorded here
+// are matched against laser mouse events (GL bottom-left origin) by the
+// bridge, which flips Y.
+
+static const char *kDashAnchorNames[] = {
+    "Left wrist", "Right wrist", "Head", "Chest", "Dash only"
+};
+
+// Tab headers shared by both dashboard views. Records tab hit rects.
+static void draw_dash_tabs(Canvas &cv, bool achievements_active, std::vector<VRDashHitRect> *hits)
+{
+    const uint32_t y = 44, h = 52;
+    struct Tab { const char *label; VRDashWidget id; bool active; };
+    Tab tabs[] = {
+        {"Achievements", VRDashWidget::tab_achievements, achievements_active},
+        {"Toast Setup", VRDashWidget::tab_setup, !achievements_active},
+    };
+    uint32_t x = 48;
+    for (const auto &t : tabs) {
+        uint32_t tw = cv.text_w(t.label, 3) + 48;
+        if (t.active) {
+            cv.rect(x, y, x + tw, y + h, 218, 165, 32, 255);
+            cv.draw_text(t.label, x + 24, y + 14, 3, 20, 22, 30);
+        } else {
+            cv.rect_outline(x, y, x + tw, y + h, 3, 120, 124, 140, 255);
+            cv.draw_text(t.label, x + 24, y + 14, 3, 170, 170, 180);
+        }
+        if (hits) hits->push_back(VRDashHitRect{t.id, x, y, x + tw, y + h});
+        x += tw + 24;
+    }
+    cv.rect(48, y + h + 12, cv.w - 48, y + h + 16, 80, 84, 100, 255);
+}
+
+struct DashSliderDraw {
+    VRDashWidget id;
+    const char *label;
+    float min_v, max_v, value;
+    const char *value_text; // pre-formatted
+};
+
+// y = top of the 62px row. Bar + knob + value; hit covers the bar column.
+static void draw_dash_slider(Canvas &cv, uint32_t y, const DashSliderDraw &s, std::vector<VRDashHitRect> &hits)
+{
+    cv.draw_text(s.label, 48, y + 8, 3, 220, 220, 230);
+    const uint32_t bx0 = 380, bx1 = 830, by = y + 14, bh = 12;
+    cv.rect(bx0, by, bx1, by + bh, 20, 22, 30, 255);
+    float f = (s.value - s.min_v) / (s.max_v - s.min_v);
+    if (f < 0) f = 0; if (f > 1) f = 1;
+    uint32_t kx = bx0 + (uint32_t)((bx1 - bx0) * f);
+    if (kx < bx0 + 8) kx = bx0 + 8;
+    if (kx > bx1 - 8) kx = bx1 - 8;
+    cv.rect(kx - 8, by - 8, kx + 8, by + bh + 8, 218, 165, 32, 255);
+    cv.draw_text(s.value_text, 850, y + 8, 3, 255, 255, 255);
+    hits.push_back(VRDashHitRect{s.id, bx0, y - 6, bx1, y + 50});
+}
+
+static void draw_dash_check(Canvas &cv, uint32_t y, const char *label, bool on, VRDashWidget id, std::vector<VRDashHitRect> &hits)
+{
+    cv.rect_outline(48, y + 6, 48 + 26, y + 32, 3, 150, 150, 160, 255);
+    if (on) cv.rect(48 + 5, y + 11, 48 + 21, y + 27, 218, 165, 32, 255);
+    cv.draw_text(label, 92, y + 8, 3, 220, 220, 230);
+    uint32_t xe = 92 + cv.text_w(label, 3) + 20;
+    hits.push_back(VRDashHitRect{id, 48, y, xe, y + 44});
+}
+
+static void draw_dash_button(Canvas &cv, uint32_t x, uint32_t y, const char *label, VRDashWidget id, std::vector<VRDashHitRect> &hits)
+{
+    uint32_t tw = cv.text_w(label, 3) + 56, h = 52;
+    cv.rect(x, y, x + tw, y + h, 48, 52, 66, 255);
+    cv.rect_outline(x, y, x + tw, y + h, 3, 218, 165, 32, 255);
+    cv.draw_text(label, x + 28, y + 14, 3, 255, 255, 255);
+    hits.push_back(VRDashHitRect{id, x, y, x + tw, y + h});
+}
+
+bool ComposeVRDashboardSetupImage(const VRDashboardSetup &setup,
+                                  const std::string &header,
+                                  VRDashboardImage &out,
+                                  std::vector<VRDashHitRect> &hits,
+                                  bool flip_y)
 {
     Canvas cv(VRDashboardImage::WIDTH, VRDashboardImage::HEIGHT);
     cv.fill(31, 36, 51, 255);
     cv.rect_outline(2, 2, cv.w - 2, cv.h - 2, 4, 255, 255, 255, 120);
 
-    uint32_t y = 48;
+    draw_dash_tabs(cv, false, &hits);
+
+    uint32_t y = 148;
+    cv.draw_text(header.empty() ? "Toast Setup" : header, 48, y, 3, 150, 150, 160);
+    y += 52;
+
+    // Anchor cycler row.
+    {
+        cv.draw_text("Anchor", 48, y + 8, 3, 220, 220, 230);
+        int a = setup.anchor < 0 ? 0 : (setup.anchor > 4 ? 4 : setup.anchor);
+        std::string cap = std::string("< ") + kDashAnchorNames[a] + " >";
+        draw_dash_button(cv, 380, y, cap.c_str(), VRDashWidget::anchor_cycle, hits);
+        y += 62;
+    }
+
+    char buf[6][32];
+    snprintf(buf[0], sizeof(buf[0]), "%.2f", setup.width_m);
+    snprintf(buf[1], sizeof(buf[1]), "%+.2f", setup.offset_x);
+    snprintf(buf[2], sizeof(buf[2]), "%+.2f", setup.offset_y);
+    snprintf(buf[3], sizeof(buf[3]), "%+.2f", setup.offset_z);
+    snprintf(buf[4], sizeof(buf[4]), "%.0f", setup.tilt_deg);
+    if (setup.duration_sec <= 0.0f) snprintf(buf[5], sizeof(buf[5]), "auto");
+    else snprintf(buf[5], sizeof(buf[5]), "%.1f s", setup.duration_sec);
+
+    DashSliderDraw sliders[] = {
+        {VRDashWidget::slider_size, "Size (m)", 0.08f, 0.30f, setup.width_m, buf[0]},
+        {VRDashWidget::slider_ox, "Offset X", -0.5f, 0.5f, setup.offset_x, buf[1]},
+        {VRDashWidget::slider_oy, "Offset Y", -0.5f, 0.5f, setup.offset_y, buf[2]},
+        {VRDashWidget::slider_oz, "Offset Z", -0.5f, 0.5f, setup.offset_z, buf[3]},
+        {VRDashWidget::slider_tilt, "Tilt", 0.0f, 90.0f, setup.tilt_deg, buf[4]},
+        {VRDashWidget::slider_duration, "Duration", -1.0f, 15.0f, setup.duration_sec, buf[5]},
+    };
+    for (const auto &s : sliders) {
+        draw_dash_slider(cv, y, s, hits);
+        y += 62;
+    }
+
+    draw_dash_check(cv, y, "Suppress desktop toast in VR", setup.suppress_desktop, VRDashWidget::check_suppress, hits);
+    y += 52;
+    draw_dash_check(cv, y, "Fall back to head if untracked", setup.fallback_to_head, VRDashWidget::check_fallback, hits);
+    y += 52;
+    draw_dash_check(cv, y, "Flip image vertically", setup.flip_y, VRDashWidget::check_flip, hits);
+    y += 62;
+
+    draw_dash_button(cv, 48, y, "Test toast", VRDashWidget::test_toast, hits);
+    {
+        uint32_t tw = cv.text_w("Test toast", 3) + 56;
+        draw_dash_button(cv, 48 + tw + 24, y, "Save", VRDashWidget::save, hits);
+    }
+    cv.draw_text("Wrist preview live", 560, y + 14, 3, 150, 150, 160);
+
+    if (flip_y) cv.flip_y();
+
+    out.rgba = std::move(cv.px);
+    return true;
+}
+
+bool ComposeVRDashboardImage(const std::vector<VRDashboardEntry> &entries,
+                             const std::string &header,
+                             VRDashboardImage &out,
+                             bool flip_y,
+                             std::vector<VRDashHitRect> *hits)
+{
+    Canvas cv(VRDashboardImage::WIDTH, VRDashboardImage::HEIGHT);
+    cv.fill(31, 36, 51, 255);
+    cv.rect_outline(2, 2, cv.w - 2, cv.h - 2, 4, 255, 255, 255, 120);
+
+    draw_dash_tabs(cv, true, hits);
+
+    uint32_t y = 148;
     cv.draw_text(header.empty() ? "GSE Achievements" : header, 48, y, 4, 255, 255, 255);
     y += 7 * 4 + 24;
     cv.rect(48, y, cv.w - 48, y + 4, 80, 84, 100, 255);

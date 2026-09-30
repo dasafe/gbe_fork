@@ -14,6 +14,7 @@
 
 #include "dll/base.h"
 #include "overlay/vr_openvr_abi.h"
+#include "overlay/vr_toast_image.h"
 #include <string>
 #include <deque>
 #include <vector>
@@ -66,6 +67,12 @@ struct VRAchToast {
     std::chrono::milliseconds scheduled_show_time{};
 };
 
+// Dashboard tab views: achievements list vs interactive Toast Setup.
+enum class VRDashboardView {
+    achievements = 0,
+    setup = 1,
+};
+
 class VROverlayBridge {
     class Settings *settings = nullptr;
 
@@ -111,6 +118,16 @@ class VROverlayBridge {
     std::vector<VRDashboardEntry> dashboard_entries{};
     std::string dashboard_header{"GSE Achievements"};
 
+    // Interactive dashboard tab state (laser mouse input).
+    VRDashboardView dash_view = VRDashboardView::achievements;
+    std::vector<VRDashHitRect> dash_hits{}; // canvas px, top-left origin
+    VRDashWidget drag_widget = VRDashWidget::none; // slider being dragged
+    bool dash_mouse_down = false;
+    bool tab_dirty = true; // dashboard texture needs re-compose + upload
+    std::chrono::steady_clock::time_point last_tab_compose{};
+    bool preview_pin = false; // setup view: preview toast stays on wrist
+    bool save_requested = false; // setup view: Save button -> persist ini
+
     bool probe_runtime();          // dynamic-load openvr_api, detect HMD (cached)
     bool ensure_overlays();        // CreateOverlay + CreateDashboardOverlay (once)
     void apply_anchor_transform(); // SetOverlayTransform* per current anchor/size/offset
@@ -128,6 +145,16 @@ class VROverlayBridge {
     // Re-compose + upload the dashboard tab texture from dashboard_entries.
     // Lock must be held. No-op without native overlays.
     void refresh_dashboard_texture();
+    // Dashboard laser-mouse input pump (PollNextOverlayEvent). Lock held.
+    void pump_dashboard_input();
+    // Show the pinned wrist preview (setup view). Lock held.
+    void show_preview_toast();
+    void set_dash_view(VRDashboardView v); // switches view + (un)pins preview
+    VRDashboardSetup current_setup_snapshot() const;
+    // Apply a 0..1 slider fraction to a slider widget (live settings).
+    void apply_slider_frac(VRDashWidget id, float frac);
+    // Activate a tapped non-slider widget. Lock held.
+    void activate_widget(VRDashWidget id);
     // Writes %TEMP%/gbe_vr_achievement_toast.json (+ .png toast image,
     // + gbe_vr_dashboard.json history snapshot) so companion tools
     // (OVR Toolkit/XSOverlay) can display even when native IVROverlay is
@@ -159,6 +186,8 @@ public:
     // Push the full achievements list for the dashboard tab (header example:
     // "GSE Achievements (3/25)"). Refreshes the tab texture when live.
     void PushAchievementList(std::vector<VRDashboardEntry> entries, const std::string &header);
+    // True once the setup view asked to persist settings (Steam_Overlay saves).
+    bool ConsumeSaveRequest();
 
     // Dashboard data access (rendered by Steam_Overlay dashboard hookup or
     // future native overlay texture painter).

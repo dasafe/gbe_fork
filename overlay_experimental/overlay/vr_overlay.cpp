@@ -290,6 +290,16 @@ bool VROverlayBridge::init_native()
     } else {
         dashboard_overlay_handle = (uint64_t)dash_main;
     }
+    if (dashboard_overlay_handle) {
+        // Laser -> mouse events + 1:1 pixel mapping to the 1024x1024 tab.
+        native_overlay->SetOverlayInputMethod(
+            (gbe_vr::VROverlayHandle_t)dashboard_overlay_handle,
+            gbe_vr::VROverlayInputMethod_Mouse);
+        gbe_vr::HmdVector2_t ms{};
+        ms.v[0] = 1024.0f; ms.v[1] = 1024.0f;
+        native_overlay->SetOverlayMouseScale(
+            (gbe_vr::VROverlayHandle_t)dashboard_overlay_handle, &ms);
+    }
 
     native_available = true;
     PRINT_DEBUG("native IVROverlay ready (scene=%llu dash=%llu sys=%p)",
@@ -581,9 +591,12 @@ void VROverlayBridge::ProcessQueue()
 {
     std::lock_guard<std::recursive_mutex> lock(vr_mutex);
     // Auto-hide the native scene toast when its duration elapses, even with
-    // nothing else queued.
-    if (scene_visible && std::chrono::steady_clock::now() >= scene_visible_until)
+    // nothing else queued. Skipped while the setup-view preview is pinned.
+    if (scene_visible && !preview_pin && std::chrono::steady_clock::now() >= scene_visible_until)
         hide_native_scene();
+    // Live drag feedback: re-apply the transform every tick while visible so
+    // slider moves track 1:1 without waiting for a PNG re-compose.
+    if (scene_visible) apply_anchor_transform();
     // Eager tab: create overlays as soon as an HMD session is present, even
     // with nothing queued, so the dashboard tab exists from game start.
     if (vr_queue.empty()) {
@@ -591,35 +604,40 @@ void VROverlayBridge::ProcessQueue()
             probe_runtime();
             if (runtime_available) ensure_overlays();
         }
-        return;
-    }
-    if (!settings || !settings->vr_overlay_config.enable_vr_overlay) {
+    } else if (!settings || !settings->vr_overlay_config.enable_vr_overlay) {
         vr_queue.clear();
-        return;
-    }
+    } else {
+        auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch());
 
-    auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch());
+        while (!vr_queue.empty()) {
+            const auto &t = vr_queue.front();
+            if (t.scheduled_show_time > now) break;
 
-    while (!vr_queue.empty()) {
-        const auto &t = vr_queue.front();
-        if (t.scheduled_show_time > now) break;
+            // Dashboard history always records (dashboard_only mode included).
+            push_dashboard_history(t);
 
-        // Dashboard history always records (dashboard_only mode included).
-        push_dashboard_history(t);
+            // Companion PNG+JSON always written (native path + external tools).
+            std::string png = write_companion_toast_file(t);
+            // Native path: show the PNG in-headset, or refresh the dashboard
+            // thumbnail in dashboard_only mode (no-op without SteamVR).
+            if (!png.empty()) {
+                ensure_overlays();
+                show_native_toast(png);
+            }
 
-        // Companion PNG+JSON always written (native path + external tools).
-        std::string png = write_companion_toast_file(t);
-        // Native path: show the PNG in-headset, or refresh the dashboard
-        // thumbnail in dashboard_only mode (no-op without SteamVR).
-        if (!png.empty()) {
-            ensure_overlays();
-            show_native_toast(png);
+            PRINT_DEBUG("VR toast shown '%s'", t.name.c_str());
+            vr_queue.pop_front();
         }
-
-        PRINT_DEBUG("VR toast shown '%s'", t.name.c_str());
-        vr_queue.pop_front();
     }
+
+    // Re-pin the setup-view preview after a real toast consumed the scene
+    // overlay (or if the pin was set before native was ready).
+    if (preview_pin && !scene_visible && vr_queue.empty())
+        show_preview_toast();
+
+    // Dashboard laser-mouse input (throttled re-compose inside).
+    pump_dashboard_input();
 }
 
 void VROverlayBridge::ShowTestToast()
@@ -638,21 +656,243 @@ void VROverlayBridge::PushAchievementList(std::vector<VRDashboardEntry> entries,
     std::lock_guard<std::recursive_mutex> lock(vr_mutex);
     dashboard_entries = std::move(entries);
     if (!header.empty()) dashboard_header = header;
-    if (overlays_created) refresh_dashboard_texture();
+    tab_dirty = true; // pump throttles the re-compose + upload
+}
+
+bool VROverlayBridge::ConsumeSaveRequest()
+{
+    std::lock_guard<std::recursive_mutex> lock(vr_mutex);
+    if (!save_requested) return false;
+    save_requested = false;
+    return true;
+}
+
+VRDashboardSetup VROverlayBridge::current_setup_snapshot() const
+{
+    VRDashboardSetup s{};
+    if (!settings) return s;
+    int a = settings->vr_overlay_config.anchor;
+    s.anchor = a < 0 ? 0 : (a > 4 ? 4 : a);
+    s.width_m = settings->vr_overlay_config.width_m;
+    s.offset_x = settings->vr_overlay_config.offset_x;
+    s.offset_y = settings->vr_overlay_config.offset_y;
+    s.offset_z = settings->vr_overlay_config.offset_z;
+    s.tilt_deg = settings->vr_overlay_config.tilt_deg;
+    s.duration_sec = settings->vr_overlay_config.duration_sec;
+    s.suppress_desktop = settings->vr_overlay_config.suppress_desktop_achievements;
+    s.fallback_to_head = settings->vr_overlay_config.fallback_to_head;
+    s.flip_y = settings->vr_overlay_config.flip_image_y;
+    return s;
+}
+
+// Slider value ranges, mirrored in the composer bar geometry.
+static bool slider_range(VRDashWidget id, float &mn, float &mx)
+{
+    switch (id) {
+        case VRDashWidget::slider_size: mn = 0.08f; mx = 0.30f; return true;
+        case VRDashWidget::slider_ox:
+        case VRDashWidget::slider_oy:
+        case VRDashWidget::slider_oz: mn = -0.5f; mx = 0.5f; return true;
+        case VRDashWidget::slider_tilt: mn = 0.0f; mx = 90.0f; return true;
+        case VRDashWidget::slider_duration: mn = -1.0f; mx = 15.0f; return true;
+        default: return false;
+    }
+}
+
+void VROverlayBridge::apply_slider_frac(VRDashWidget id, float frac)
+{
+    if (!settings) return;
+    float mn = 0, mx = 1;
+    if (!slider_range(id, mn, mx)) return;
+    if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+    float v = mn + (mx - mn) * frac;
+    switch (id) {
+        case VRDashWidget::slider_size: SetWidth(v); break;
+        case VRDashWidget::slider_ox:
+        case VRDashWidget::slider_oy:
+        case VRDashWidget::slider_oz: {
+            float x = settings->vr_overlay_config.offset_x;
+            float y = settings->vr_overlay_config.offset_y;
+            float z = settings->vr_overlay_config.offset_z;
+            if (id == VRDashWidget::slider_ox) x = v;
+            if (id == VRDashWidget::slider_oy) y = v;
+            if (id == VRDashWidget::slider_oz) z = v;
+            SetOffset(x, y, z);
+            break;
+        }
+        case VRDashWidget::slider_tilt: SetTilt(v); break;
+        case VRDashWidget::slider_duration:
+            settings->vr_overlay_config.duration_sec = v;
+            break;
+        default: break;
+    }
+    tab_dirty = true; // knob moves on the tab (throttled re-compose)
+}
+
+void VROverlayBridge::activate_widget(VRDashWidget id)
+{
+    switch (id) {
+        case VRDashWidget::tab_achievements:
+            set_dash_view(VRDashboardView::achievements);
+            break;
+        case VRDashWidget::tab_setup:
+            set_dash_view(VRDashboardView::setup);
+            break;
+        case VRDashWidget::anchor_cycle:
+            if (settings) {
+                int a = settings->vr_overlay_config.anchor;
+                a = (a + 1) % 5;
+                if (a < 0) a = 0;
+                SetAnchor(static_cast<VRToastAnchor>(a));
+                tab_dirty = true;
+            }
+            break;
+        case VRDashWidget::check_suppress:
+            if (settings) {
+                settings->vr_overlay_config.suppress_desktop_achievements =
+                    !settings->vr_overlay_config.suppress_desktop_achievements;
+                tab_dirty = true;
+            }
+            break;
+        case VRDashWidget::check_fallback:
+            if (settings) {
+                settings->vr_overlay_config.fallback_to_head =
+                    !settings->vr_overlay_config.fallback_to_head;
+                tab_dirty = true;
+            }
+            break;
+        case VRDashWidget::check_flip:
+            if (settings) {
+                settings->vr_overlay_config.flip_image_y =
+                    !settings->vr_overlay_config.flip_image_y;
+                tab_dirty = true;
+            }
+            break;
+        case VRDashWidget::test_toast:
+            ShowTestToast();
+            break;
+        case VRDashWidget::save:
+            save_requested = true;
+            break;
+        default: break;
+    }
+}
+
+void VROverlayBridge::set_dash_view(VRDashboardView v)
+{
+    if (dash_view == v && v == VRDashboardView::achievements) return;
+    dash_view = v;
+    tab_dirty = true;
+    if (v == VRDashboardView::setup) {
+        preview_pin = true;
+        show_preview_toast();
+    } else {
+        preview_pin = false;
+        hide_native_scene();
+    }
+}
+
+void VROverlayBridge::show_preview_toast()
+{
+    if (!settings) return;
+    VRAchToast t{};
+    t.name = "gbe_preview_toast";
+    t.title = "Preview toast";
+    t.description = "Tune until readable at a glance";
+    t.achieved = true;
+    std::string png = write_companion_toast_file(t);
+    if (!png.empty()) {
+        ensure_overlays();
+        show_native_toast(png);
+        // Pin: no auto-hide while the setup view is open.
+        scene_visible_until = std::chrono::steady_clock::time_point::max();
+    }
+}
+
+void VROverlayBridge::pump_dashboard_input()
+{
+    // Lock is held by ProcessQueue().
+    if (!native_available || !native_overlay || !dashboard_overlay_handle) return;
+    auto dash = (gbe_vr::VROverlayHandle_t)dashboard_overlay_handle;
+    for (int n = 0; n < 32; ++n) {
+        gbe_vr::VREvent_Compat_t ev{};
+        if (!native_overlay->PollNextOverlayEvent(dash, &ev, (uint32_t)sizeof(ev))) break;
+        if (ev.event_type != gbe_vr::k_VREvent_MouseMove &&
+            ev.event_type != gbe_vr::k_VREvent_MouseButtonDown &&
+            ev.event_type != gbe_vr::k_VREvent_MouseButtonUp)
+            continue;
+        // Mouse scale == texture px; GL bottom-left origin -> canvas top-left.
+        float cx = ev.mouse.x;
+        float cy = (float)VRDashboardImage::HEIGHT - ev.mouse.y;
+        bool left = (ev.mouse.button & gbe_vr::k_VRMouseButton_Left) != 0;
+
+        if (ev.event_type == gbe_vr::k_VREvent_MouseButtonUp) {
+            dash_mouse_down = false;
+            drag_widget = VRDashWidget::none;
+            continue;
+        }
+        if (ev.event_type == gbe_vr::k_VREvent_MouseButtonDown && left) {
+            dash_mouse_down = true;
+            // Topmost widget wins: hits are recorded back-to-front, scan reverse.
+            for (size_t i = dash_hits.size(); i-- > 0;) {
+                const auto &h = dash_hits[i];
+                if (cx >= h.x0 && cx < h.x1 && cy >= h.y0 && cy < h.y1) {
+                    float mn = 0, mx = 1;
+                    if (slider_range(h.id, mn, mx)) {
+                        drag_widget = h.id;
+                        // Bar spans the hit rect horizontally.
+                        float frac = (h.x1 > h.x0) ? (cx - (float)h.x0) / (float)(h.x1 - h.x0) : 0.0f;
+                        apply_slider_frac(h.id, frac);
+                    } else {
+                        activate_widget(h.id);
+                    }
+                    break;
+                }
+            }
+            continue;
+        }
+        // MouseMove: drag the active slider.
+        if (ev.event_type == gbe_vr::k_VREvent_MouseMove && dash_mouse_down &&
+            drag_widget != VRDashWidget::none) {
+            for (size_t i = dash_hits.size(); i-- > 0;) {
+                const auto &h = dash_hits[i];
+                if (h.id == drag_widget) {
+                    float frac = (h.x1 > h.x0) ? (cx - (float)h.x0) / (float)(h.x1 - h.x0) : 0.0f;
+                    apply_slider_frac(h.id, frac);
+                    break;
+                }
+            }
+        }
+    }
+    // Throttled tab re-compose (slider drags flood move events).
+    if (tab_dirty) {
+        auto now = std::chrono::steady_clock::now();
+        if (now - last_tab_compose >= std::chrono::milliseconds(150)) {
+            refresh_dashboard_texture();
+        }
+    }
 }
 
 void VROverlayBridge::refresh_dashboard_texture()
 {
-    // Lock is held by callers (ensure_overlays / PushAchievementList).
+    // Lock is held by callers (ensure_overlays / pump_dashboard_input).
     if (!native_available || !native_overlay || !dashboard_overlay_handle) return;
     try {
         auto tmp = std::filesystem::temp_directory_path();
         auto png_path = tmp / "gbe_vr_dashboard.png";
+        bool flip = settings && settings->vr_overlay_config.flip_image_y;
+        dash_hits.clear();
         VRDashboardImage img{};
         std::vector<uint8_t> png{};
-        if (ComposeVRDashboardImage(dashboard_entries, dashboard_header, img,
-                                    settings && settings->vr_overlay_config.flip_image_y) &&
-            EncodeVRDashboardPNG(img, png) && !png.empty()) {
+        bool composed = false;
+        if (dash_view == VRDashboardView::setup) {
+            composed = ComposeVRDashboardSetupImage(
+                current_setup_snapshot(), "Toast Setup", img, dash_hits, flip);
+        } else {
+            composed = ComposeVRDashboardImage(
+                dashboard_entries, dashboard_header, img, flip, &dash_hits);
+        }
+        if (composed && EncodeVRDashboardPNG(img, png) && !png.empty()) {
             std::ofstream pf(png_path, std::ios::binary | std::ios::trunc);
             if (!pf) return;
             pf.write(reinterpret_cast<const char *>(png.data()), (std::streamsize)png.size());
@@ -663,6 +903,8 @@ void VROverlayBridge::refresh_dashboard_texture()
                 PRINT_DEBUG("dashboard texture upload failed");
             }
         }
+        tab_dirty = false;
+        last_tab_compose = std::chrono::steady_clock::now();
     } catch (const std::exception &e) {
         PRINT_DEBUG("dashboard texture failed: %s", e.what());
     } catch (...) {

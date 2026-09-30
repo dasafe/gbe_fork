@@ -862,7 +862,7 @@ void Steam_Overlay::show_test_achievement()
     post_achievement_notification(ach, for_progress);
     // NOTE: no extra VR queue here: post_achievement_notification() already
     // routes HMD-exclusive when VR is active (with the random icon above),
-    // otherwise desktop. The Toast Setup "Test VR toast" button calls
+    // otherwise desktop. The dashboard Toast Setup "Test toast" button calls
     // VROverlayBridge::ShowTestToast() directly for placement previews.
     // sound is now played when notification is actually shown (delayed with queue)
 }
@@ -1912,6 +1912,11 @@ void Steam_Overlay::overlay_render_proc()
         push_vr_dashboard_list();
         vr_dashboard_list_dirty = false;
     }
+    // Dashboard Toast Setup "Save" button persists the ini.
+    if (vr_bridge && vr_bridge->ConsumeSaveRequest()) {
+        save_settings = true;
+        vr_dashboard_list_dirty = true; // tab shows any saved-state change
+    }
 
     // Check for pending game update notification
     if (settings->pending_update_available) {
@@ -2603,51 +2608,11 @@ void Steam_Overlay::render_main_window()
 
                 ImGui::Separator();
 
-                // VR achievement toasts (HMD) + dashboard tab setup.
-                // Live session editing; persist via steam_settings configs.overlay.ini [overlay::vr].
+                // VR toast setup lives in the SteamVR dashboard tab
+                // ("Toast Setup" view), not here.
                 {
                     bool vr_detected = vr_bridge && vr_bridge->IsActive();
-                    ImGui::Text("VR achievements: %s", vr_detected ? "HMD active" : "flat / no runtime");
-                    const char *anchors[] = { "Left wrist", "Right wrist", "Head", "Chest (knee-chest)", "Dashboard only" };
-                    int anchor_idx = settings->vr_overlay_config.anchor;
-                    if (anchor_idx < 0 || anchor_idx > 4) anchor_idx = 0;
-                    if (ImGui::Combo("VR toast anchor", &anchor_idx, anchors, 5)) {
-                        settings->vr_overlay_config.anchor = anchor_idx;
-                        if (vr_bridge) vr_bridge->SetAnchor((VRToastAnchor)anchor_idx);
-                    }
-                    float w = settings->vr_overlay_config.width_m;
-                    if (ImGui::SliderFloat("VR toast size (m)", &w, 0.08f, 0.30f)) {
-                        if (vr_bridge) vr_bridge->SetWidth(w);
-                        else settings->vr_overlay_config.width_m = w;
-                    }
-                    float ox = settings->vr_overlay_config.offset_x;
-                    float oy = settings->vr_overlay_config.offset_y;
-                    float oz = settings->vr_overlay_config.offset_z;
-                    bool off_changed = false;
-                    off_changed |= ImGui::SliderFloat("VR offset X", &ox, -0.50f, 0.50f);
-                    off_changed |= ImGui::SliderFloat("VR offset Y", &oy, -0.50f, 0.50f);
-                    off_changed |= ImGui::SliderFloat("VR offset Z", &oz, -0.50f, 0.50f);
-                    if (off_changed && vr_bridge) vr_bridge->SetOffset(ox, oy, oz);
-                    else if (off_changed) {
-                        settings->vr_overlay_config.offset_x = ox;
-                        settings->vr_overlay_config.offset_y = oy;
-                        settings->vr_overlay_config.offset_z = oz;
-                    }
-                    float tilt = settings->vr_overlay_config.tilt_deg;
-                    if (ImGui::SliderFloat("VR wrist tilt (deg)", &tilt, 0.0f, 90.0f)) {
-                        if (vr_bridge) vr_bridge->SetTilt(tilt);
-                        else settings->vr_overlay_config.tilt_deg = tilt;
-                    }
-                    ImGui::SliderFloat("VR toast duration (s, <=0 auto)", &settings->vr_overlay_config.duration_sec, -1.0f, 15.0f);
-                    ImGui::Checkbox("Suppress desktop achievement toast in VR", &settings->vr_overlay_config.suppress_desktop_achievements);
-                    ImGui::Checkbox("Fall back to head if wrist untracked", &settings->vr_overlay_config.fallback_to_head);
-                    if (ImGui::Checkbox("Flip VR toast image vertically", &settings->vr_overlay_config.flip_image_y)) {
-                        vr_dashboard_list_dirty = true; // dashboard uses the same composer path
-                    }
-                    if (ImGui::Button("Test VR toast")) {
-                        if (vr_bridge) vr_bridge->ShowTestToast();
-                        else show_test_achievement();
-                    }
+                    ImGui::Text("VR achievements: %s", vr_detected ? "HMD active (see dashboard tab)" : "flat / no runtime");
                 }
 
                 ImGui::Separator();
