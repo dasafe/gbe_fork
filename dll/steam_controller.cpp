@@ -274,7 +274,8 @@ bool Steam_Controller::Init( const char *pchAbsolutePathToControllerConfigVDF )
 
 bool Steam_Controller::Init()
 {
-    return Init(true);
+    PRINT_DEBUG("(void)");
+    return Init(false);
 }
 
 bool Steam_Controller::Shutdown()
@@ -1174,7 +1175,7 @@ void Steam_Controller::SetDualSenseTriggerEffect( InputHandle_t inputHandle, con
 
 void Steam_Controller::RunCallbacks()
 {
-    if (explicitly_call_run_frame) {
+    if (!explicitly_call_run_frame) {
         RunFrame();
     }
 }

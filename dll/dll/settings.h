@@ -297,9 +297,6 @@ public:
     //steamhttp external download support
     bool download_steamhttp_requests = false;
     bool force_steamhttp_success = false;
-
-    //steam deck flag
-    bool steam_deck = false;
     
     // use new app_ticket auth instead of old one
     bool enable_new_app_ticket = true;
@@ -402,6 +399,7 @@ public:
     bool overlay_show_button_screenshots = true;
     bool overlay_show_button_history = true;
     bool overlay_show_button_settings = true;
+    bool overlay_show_button_steam_page = true;
     bool overlay_show_checkbox_fps = true;
     bool overlay_show_checkbox_frametime = true;
     bool overlay_show_checkbox_playtime = true;
@@ -452,6 +450,15 @@ public:
 
     // only use 32 bits for inventory item ids
     bool use_32bit_inventory_item_ids = false;
+
+    // steam hardware flag
+    ESteamHardwareType steam_hardware_type = k_ESteamHardwareTypeNone;
+
+    // steam hardware default config
+    ESteamHardwareDefaultConfig steam_hardware_def_config = k_ESteamHardwareDefaultConfigNone;
+
+    // steam proton flag
+    bool is_under_proton = false;
 
 
 #ifdef LOBBY_CONNECT

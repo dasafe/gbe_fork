@@ -2263,6 +2263,24 @@ void Steam_Overlay::render_main_window()
             }
         }
 
+        if (settings->overlay_show_button_steam_page) {
+            ImGui::SameLine();
+            // user clicked on "steam page"
+            if (ImGui::Button("Steam Page")) {
+                std::string url = "https://store.steampowered.com/app/"
+                    + std::to_string(settings->get_local_game_id().AppID());
+#ifdef __WINDOWS__
+                ShellExecuteA(NULL, "open", url.c_str(), NULL, NULL, SW_SHOWNORMAL);
+#elif defined(__linux__)
+                std::string cmd = "xdg-open \"" + url + "\"";
+                std::system(cmd.c_str());
+#elif defined(__APPLE__)
+                std::string cmd = "open \"" + url + "\"";
+                std::system(cmd.c_str());
+#endif
+            }
+        }
+
         ImGui::Spacing();
         ImGui::Spacing();
         // user clicked on "FPS"
@@ -2861,10 +2879,15 @@ void Steam_Overlay::SetNotificationInset(int nHorizontalInset, int nVerticalInse
 
 void Steam_Overlay::OpenOverlayInvite(CSteamID lobbyId)
 {
-    PRINT_DEBUG("TODO %llu", lobbyId.ConvertToUint64());
+    PRINT_DEBUG("%llu", lobbyId.ConvertToUint64());
     std::lock_guard<std::recursive_mutex> lock(overlay_mutex);
     if (!Ready()) return;
 
+    // remember the lobby the game wants the invitations to be sent to,
+    // the actual invite happens later when the user clicks "invite" on a friend
+    if (lobbyId.IsValid()) {
+        invite_lobby_id = lobbyId.ConvertToUint64();
+    }
     ShowOverlay(true);
 }
 
@@ -3074,9 +3097,18 @@ void Steam_Overlay::invite_friend(uint64 friend_id, class Steam_Friends* steamFr
     if (connect_str.length() > 0) {
         steamFriends->InviteUserToGame(friend_id, connect_str.c_str());
         PRINT_DEBUG("sent game invitation to friend with id = %llu", friend_id);
-    } else if (settings->get_lobby().IsValid()) {
-        steamMatchmaking->InviteUserToLobby(settings->get_lobby(), friend_id);
-        PRINT_DEBUG("sent lobby invitation to friend with id = %llu", friend_id);
+    } else {
+        // prefer the lobby the game explicitly passed to OpenOverlayInvite(),
+        // otherwise fall back to the last joined lobby
+        CSteamID lobby_id( invite_lobby_id.load(std::memory_order_relaxed) );
+        if (!lobby_id.IsValid()) {
+            lobby_id = settings->get_lobby();
+        }
+
+        if (lobby_id.IsValid()) {
+            steamMatchmaking->InviteUserToLobby(lobby_id, friend_id);
+            PRINT_DEBUG("sent lobby invitation (%llu) to friend with id = %llu", lobby_id.ConvertToUint64(), friend_id);
+        }
     }
 }
 

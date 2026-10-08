@@ -147,6 +147,16 @@ bool Steam_Networking_Sockets::send_packet_new_connection(HSteamNetConnection m_
     return false;
 }
 
+std::string Steam_Networking_Sockets::get_version() const
+{
+    return version;
+}
+
+void Steam_Networking_Sockets::set_version(const std::string &version)
+{
+    this->version = version;
+}
+
 shared_between_client_server* Steam_Networking_Sockets::get_shared_between_client_server()
 {
     return sbcs;
@@ -361,33 +371,31 @@ HSteamNetConnection Steam_Networking_Sockets::ConnectByIPAddress( const SteamNet
 {
     PRINT_DEBUG("old");
     std::lock_guard<std::recursive_mutex> lock(global_mutex);
-    SteamNetworkingIdentity ip_id;
+    SteamNetworkingIdentity ip_id{};
     ip_id.SetIPAddr(address);
     HSteamNetConnection socket = new_connect_socket(ip_id, SNS_DISABLED_PORT, address.m_port);
     send_packet_new_connection(socket);
+
+    // new_connect_socket() defaults status to CONNECT_SOCKET_CONNECTING, so passing
+    // CONNECT_SOCKET_NO_CONNECTION as old_status yields None -> Connecting.
+    if (socket != k_HSteamNetConnection_Invalid) {
+        launch_callback(socket, CONNECT_SOCKET_NO_CONNECTION);
+    }
+
     return socket;
 }
 
 HSteamNetConnection Steam_Networking_Sockets::ConnectByIPAddress( const SteamNetworkingIPAddr *address )
 {
     PRINT_DEBUG("old1");
-    std::lock_guard<std::recursive_mutex> lock(global_mutex);
-    SteamNetworkingIdentity ip_id;
-    ip_id.SetIPAddr(*address);
-    HSteamNetConnection socket = new_connect_socket(ip_id, SNS_DISABLED_PORT, address->m_port);
-    send_packet_new_connection(socket);
-    return socket;
+    return ConnectByIPAddress(*address);
 }
 
 HSteamNetConnection Steam_Networking_Sockets::ConnectByIPAddress( const SteamNetworkingIPAddr &address, int nOptions, const SteamNetworkingConfigValue_t *pOptions )
 {
     PRINT_DEBUG("%X", address.GetIPv4());
-    std::lock_guard<std::recursive_mutex> lock(global_mutex);
-    SteamNetworkingIdentity ip_id;
-    ip_id.SetIPAddr(address);
-    HSteamNetConnection socket = new_connect_socket(ip_id, SNS_DISABLED_PORT, address.m_port);
-    send_packet_new_connection(socket);
-    return socket;
+    // TODO config options
+    return ConnectByIPAddress(address);
 }
 
 /// Like CreateListenSocketIP, but clients will connect using ConnectP2P
@@ -445,6 +453,13 @@ HSteamNetConnection Steam_Networking_Sockets::ConnectP2P( const SteamNetworkingI
 
     HSteamNetConnection socket = new_connect_socket(identityRemote, nVirtualPort, SNS_DISABLED_PORT);
     send_packet_new_connection(socket);
+
+    // new_connect_socket() defaults status to CONNECT_SOCKET_CONNECTING, so passing
+    // CONNECT_SOCKET_NO_CONNECTION as old_status yields None -> Connecting.
+    if (socket != k_HSteamNetConnection_Invalid) {
+        launch_callback(socket, CONNECT_SOCKET_NO_CONNECTION);
+    }
+
     return socket;
 }
 
@@ -814,8 +829,10 @@ EResult Steam_Networking_Sockets::SendMessageToConnection( HSteamNetConnection h
 /// failure codes.
 void Steam_Networking_Sockets::SendMessages( int nMessages, SteamNetworkingMessage_t *const *pMessages, int64 *pOutMessageNumberOrResult )
 {
-    PRINT_DEBUG_ENTRY();
+    PRINT_DEBUG("before SDK 1.65");
     std::lock_guard<std::recursive_mutex> lock(global_mutex);
+    if (!pMessages || nMessages <= 0) return;
+
     for (int i = 0; i < nMessages; ++i) {
         int64 out_number = 0;
         int result = k_EResultInvalidParam;
@@ -864,8 +881,112 @@ void Steam_Networking_Sockets::SendMessages( int nMessages, SteamNetworkingMessa
             }
         }
 
-        pMessages[i]->m_pfnFreeData(pMessages[i]);
-        pMessages[i]->Release();
+        if (pMessages[i]) {
+            if (pMessages[i]->m_pfnFreeData) {
+                pMessages[i]->m_pfnFreeData(pMessages[i]);
+                pMessages[i]->Release();
+            }
+        }
+    }
+}
+
+void Steam_Networking_Sockets::SendMessages( int nMessages, SteamNetworkingMessage_t **pMessages, int64 *pOutMessageNumberOrResult, bool bDeleteFailedMessages )
+{
+    PRINT_DEBUG_ENTRY();
+    std::lock_guard<std::recursive_mutex> lock(global_mutex);
+    if (!pMessages || nMessages <= 0) return;
+    
+    std::unordered_set<HSteamNetConnection> failed_connections;
+
+    for (int i = 0; i < nMessages; ++i) {
+        int64 out_number = 0;
+        int result = k_EResultInvalidParam;
+
+        if (pMessages[i]) {
+            auto connect_socket = sbcs->connect_sockets.find(pMessages[i]->m_conn);
+            if (connect_socket == sbcs->connect_sockets.end()) {
+                result = k_EResultInvalidParam;
+            } else if (connect_socket->second.status == CONNECT_SOCKET_CLOSED || connect_socket->second.status == CONNECT_SOCKET_TIMEDOUT) {
+                result = k_EResultNoConnection;
+            } else if (connect_socket->second.status != CONNECT_SOCKET_CONNECTED && connect_socket->second.status != CONNECT_SOCKET_CONNECTING) {
+                result = k_EResultInvalidState;
+            } else if (failed_connections.find(pMessages[i]->m_conn) != failed_connections.end()) {
+                result = k_EResultNone; // not attempted because an earlier message for the same connection failed
+            } else {
+                Common_Message msg;
+                msg.set_source_id(connect_socket->second.created_by.ConvertToUint64());
+                msg.set_dest_id(connect_socket->second.remote_identity.GetSteamID64());
+                msg.set_allocated_networking_sockets(new Networking_Sockets);
+                msg.mutable_networking_sockets()->set_type(Networking_Sockets::DATA);
+                msg.mutable_networking_sockets()->set_virtual_port(connect_socket->second.virtual_port);
+                msg.mutable_networking_sockets()->set_real_port(connect_socket->second.real_port);
+                msg.mutable_networking_sockets()->set_connection_id_from(connect_socket->first);
+                msg.mutable_networking_sockets()->set_connection_id(connect_socket->second.remote_id);
+                msg.mutable_networking_sockets()->set_data(pMessages[i]->m_pData, pMessages[i]->m_cbSize);
+                msg.mutable_networking_sockets()->set_lane(pMessages[i]->m_idxLane);
+
+                uint64 message_number = connect_socket->second.packet_send_counter;
+                msg.mutable_networking_sockets()->set_message_number(message_number);
+                connect_socket->second.packet_send_counter += 1;
+
+                bool reliable = false;
+                if (pMessages[i]->m_nFlags & k_nSteamNetworkingSend_Reliable) reliable = true;
+                if (network->sendTo(&msg, reliable)) {
+                    out_number = message_number;
+                    result = k_EResultOK;
+                } else {
+                    result = k_EResultFail;
+                    failed_connections.insert(pMessages[i]->m_conn);
+                }
+            }
+        }
+
+        if (bDeleteFailedMessages) {
+            if (result == k_EResultOK) {
+                if (pOutMessageNumberOrResult) {
+                    pOutMessageNumberOrResult[i] = out_number;
+                }
+            }
+            else if (result == k_EResultNone) {
+                if (pOutMessageNumberOrResult) {
+                    pOutMessageNumberOrResult[i] = 0;
+                }
+            }
+            else {
+                if (pOutMessageNumberOrResult) {
+                    pOutMessageNumberOrResult[i] = -result;
+                }
+            }
+
+            if (pMessages[i]) {
+                if (pMessages[i]->m_pfnFreeData)
+                    pMessages[i]->m_pfnFreeData(pMessages[i]);
+                pMessages[i]->Release();
+            }
+        }
+        else {
+            if (result == k_EResultOK) {
+                if (pOutMessageNumberOrResult) {
+                    pOutMessageNumberOrResult[i] = out_number;
+                }
+                if (pMessages[i]) {
+                    if (pMessages[i]->m_pfnFreeData)
+                        pMessages[i]->m_pfnFreeData(pMessages[i]);
+                    pMessages[i]->Release();
+                    pMessages[i] = NULL;
+                }
+            }
+            else if (result == k_EResultNone) {
+                if (pOutMessageNumberOrResult) {
+                    pOutMessageNumberOrResult[i] = 0;
+                }
+            }
+            else {
+                if (pOutMessageNumberOrResult) {
+                    pOutMessageNumberOrResult[i] = -result;
+                }
+            }
+        }
     }
 }
 
@@ -1172,11 +1293,11 @@ bool Steam_Networking_Sockets::CreateSocketPair( HSteamNetConnection *pOutConnec
 /// identity.  Otherwise, if you pass nullptr, the respective connection will assume a generic
 /// "localhost" identity.  If you use real network loopback, this might be translated to the
 /// actual bound loopback port.  Otherwise, the port will be zero.
-bool Steam_Networking_Sockets::CreateSocketPair( HSteamNetConnection *pOutConnection1, HSteamNetConnection *pOutConnection2, bool bUseNetworkLoopback, const SteamNetworkingIdentity *pIdentity1, const SteamNetworkingIdentity *pIdentity2 )
+bool Steam_Networking_Sockets::CreateSocketPair( HSteamNetConnection *pOutConnection1, HSteamNetConnection *pOutConnection2, bool bUseNetworkLoopback, const SteamNetworkingIdentity *pPeerIdentity1, const SteamNetworkingIdentity *pPeerIdentity2 )
 {
-    PRINT_DEBUG("%u %p %p", bUseNetworkLoopback, pIdentity1, pIdentity2);
+    PRINT_DEBUG("%u %p %p", bUseNetworkLoopback, pPeerIdentity1, pPeerIdentity2);
     std::lock_guard<std::recursive_mutex> lock(global_mutex);
-    if (!pOutConnection1 || !pOutConnection1) return false;
+    if (!pOutConnection1 || !pOutConnection2) return false;
 
     SteamNetworkingIdentity remote_identity;
     remote_identity.SetSteamID(settings->get_local_steam_id());

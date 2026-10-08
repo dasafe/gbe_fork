@@ -1689,6 +1689,9 @@ static void parse_overlay_general_config(class Settings *settings_client, class 
     settings_client->overlay_show_button_settings = ini.GetBoolValue("overlay::general", "show_button_settings", settings_client->overlay_show_button_settings);
     settings_server->overlay_show_button_settings = ini.GetBoolValue("overlay::general", "show_button_settings", settings_server->overlay_show_button_settings);
 
+    settings_client->overlay_show_button_steam_page = ini.GetBoolValue("overlay::general", "show_button_steam_page", settings_client->overlay_show_button_steam_page);
+    settings_server->overlay_show_button_steam_page = ini.GetBoolValue("overlay::general", "show_button_steam_page", settings_server->overlay_show_button_steam_page);
+
     settings_client->overlay_show_checkbox_fps = ini.GetBoolValue("overlay::general", "show_checkbox_fps", settings_client->overlay_show_checkbox_fps);
     settings_server->overlay_show_checkbox_fps = ini.GetBoolValue("overlay::general", "show_checkbox_fps", settings_server->overlay_show_checkbox_fps);
 
@@ -1826,8 +1829,7 @@ static void parse_simple_features(class Settings *settings_client, class Setting
     settings_client->enable_voice_chat = ini.GetBoolValue("main::general", "enable_voice_chat", settings_client->enable_voice_chat);
     settings_server->enable_voice_chat = ini.GetBoolValue("main::general", "enable_voice_chat", settings_server->enable_voice_chat);
 
-    settings_client->steam_deck = ini.GetBoolValue("main::general", "steam_deck", settings_client->steam_deck);
-    settings_server->steam_deck = ini.GetBoolValue("main::general", "steam_deck", settings_server->steam_deck);
+    bool steam_deck = ini.GetBoolValue("main::general", "steam_deck", false);
 
     settings_client->immediate_gameserver_stats = ini.GetBoolValue("main::general", "immediate_gameserver_stats", settings_client->immediate_gameserver_stats);
     settings_server->immediate_gameserver_stats = ini.GetBoolValue("main::general", "immediate_gameserver_stats", settings_server->immediate_gameserver_stats);
@@ -1843,6 +1845,95 @@ static void parse_simple_features(class Settings *settings_client, class Setting
 
     settings_client->steam_api_key = common_helpers::string_strip(ini.GetValue("main::general", "steam_api_key", settings_client->steam_api_key.c_str()));
     settings_server->steam_api_key = common_helpers::string_strip(ini.GetValue("main::general", "steam_api_key", settings_server->steam_api_key.c_str()));
+    {
+        ESteamHardwareType steam_hardware_type{};
+        long steam_hardware_type_long = ini.GetLongValue("main::general", "steam_hardware_type", static_cast<long>(settings_client->steam_hardware_type));
+        switch (steam_hardware_type_long) {
+        case 0:
+            steam_hardware_type = k_ESteamHardwareTypeNone;
+            break;
+        case 1:
+            steam_hardware_type = k_ESteamHardwareTypeSteamDeck;
+            break;
+        case 2:
+            steam_hardware_type = k_ESteamHardwareTypeSteamMachine;
+            break;
+        case 3:
+            steam_hardware_type = k_ESteamHardwareTypeSteamFrame;
+            break;
+
+        default:
+            steam_hardware_type = k_ESteamHardwareTypeNone;
+            break;
+        }
+        if (steam_hardware_type == k_ESteamHardwareTypeNone && steam_deck) {
+            steam_hardware_type = k_ESteamHardwareTypeSteamDeck; // temp compatibility for `steam_deck` option, will be removed eventually
+        }
+        settings_client->steam_hardware_type = steam_hardware_type;
+        settings_server->steam_hardware_type = steam_hardware_type;
+    }
+
+    {
+        ESteamHardwareDefaultConfig steam_hardware_def_config{};
+        long steam_hardware_def_config_long = ini.GetLongValue("main::general", "steam_hardware_default_config", static_cast<long>(settings_client->steam_hardware_def_config));
+        switch (steam_hardware_def_config_long) {
+        case 0:
+            steam_hardware_def_config = k_ESteamHardwareDefaultConfigNone;
+            break;
+        case 1:
+            steam_hardware_def_config = k_ESteamHardwareDefaultConfigLow;
+            break;
+        case 2:
+            steam_hardware_def_config = k_ESteamHardwareDefaultConfigMedium;
+            break;
+        case 3:
+            steam_hardware_def_config = k_ESteamHardwareDefaultConfigHigh;
+            break;
+        case 4:
+            steam_hardware_def_config = k_ESteamHardwareDefaultConfigMax;
+            break;
+        case 5:
+            steam_hardware_def_config = k_ESteamHardwareDefaultConfigSteamDeck;
+            break;
+        case 6:
+            steam_hardware_def_config = k_ESteamHardwareDefaultConfigSteamMachine;
+            break;
+        case 7:
+            steam_hardware_def_config = k_ESteamHardwareDefaultConfigSteamFrame;
+            break;
+
+        default:
+            steam_hardware_def_config = k_ESteamHardwareDefaultConfigNone;
+            break;
+        }
+
+        if (steam_hardware_def_config == k_ESteamHardwareDefaultConfigNone) {
+            switch (settings_client->steam_hardware_type) {
+            case k_ESteamHardwareTypeNone:
+                steam_hardware_def_config = k_ESteamHardwareDefaultConfigNone;
+                break;
+            case k_ESteamHardwareTypeSteamDeck:
+                steam_hardware_def_config = k_ESteamHardwareDefaultConfigSteamDeck;
+                break;
+            case k_ESteamHardwareTypeSteamMachine:
+                steam_hardware_def_config = k_ESteamHardwareDefaultConfigSteamMachine;
+                break;
+            case k_ESteamHardwareTypeSteamFrame:
+                steam_hardware_def_config = k_ESteamHardwareDefaultConfigSteamFrame;
+                break;
+
+            default:
+                steam_hardware_def_config = k_ESteamHardwareDefaultConfigNone;
+                break;
+            }
+        }
+
+        settings_client->steam_hardware_def_config = steam_hardware_def_config;
+        settings_server->steam_hardware_def_config = steam_hardware_def_config;
+    }
+
+    settings_client->is_under_proton = ini.GetBoolValue("main::general", "is_under_proton", settings_client->is_under_proton);
+    settings_server->is_under_proton = ini.GetBoolValue("main::general", "is_under_proton", settings_server->is_under_proton);
 
     // [main::connectivity]
     settings_client->disable_networking = ini.GetBoolValue("main::connectivity", "disable_networking", settings_client->disable_networking);

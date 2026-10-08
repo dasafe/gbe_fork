@@ -212,15 +212,6 @@ static void load_old_steam_interfaces()
     reset_LastError();
 }
 
-inline int get_old_interface_ver(const char *interface_name)
-{
-    size_t len = strlen(interface_name);
-    if (len < 3)
-        return 0;
-
-    return atoi(interface_name + (len - 3));
-}
-
 // declare "g_pSteamClientGameServer" as an export for API library, then actually define it
 #if !defined(STEAMCLIENT_DLL) // api
 STEAMAPI_API ISteamClient *g_pSteamClientGameServer;
