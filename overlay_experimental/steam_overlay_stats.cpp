@@ -37,27 +37,54 @@ bool Steam_Overlay_Stats::show_any_stats() const
     return show_fps || show_frametime || show_playtime;
 }
 
-void Steam_Overlay_Stats::update_frametime(const std::chrono::high_resolution_clock::time_point &now)
+void Steam_Overlay_Stats::update_frametime(const std::chrono::steady_clock::time_point &now)
 {
-    running_frametime_ms += static_cast<unsigned>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(now - last_frame_timepoint).count()
+    // ms-based sliding average, updated every frame (smooth, framerate-independent).
+    // ns precision: FPS = 1000 / avg(frametime).
+    const auto delta_ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now - last_frame_timepoint).count()
     );
     last_frame_timepoint = now;
-    if (last_frametime_idx >= (settings->overlay_fps_avg_window - 1)) {
-        last_frametime_idx = 0;
-        active_frametime_ms = static_cast<float>(running_frametime_ms) / settings->overlay_fps_avg_window;
-        if (running_frametime_ms > 0) {
-            active_fps = static_cast<unsigned>((1000 * settings->overlay_fps_avg_window) / running_frametime_ms);
-        } else { // happens when avg window =1, no idea why!
-            active_fps = 999;
+
+    // Drop huge gaps (overlay init, ALT+TAB, hitch) so they don't poison the average.
+    constexpr uint64_t kMaxDeltaNs = 500ULL * 1000ULL * 1000ULL; // 500ms
+    if (delta_ns > kMaxDeltaNs || delta_ns == 0) {
+        if (delta_ns > kMaxDeltaNs) {
+            recent_deltas_ns.clear();
+            running_sum_ns = 0;
         }
-        running_frametime_ms = 0;
-    } else {
-        ++last_frametime_idx;
+        return;
+    }
+
+    unsigned window_ms = settings->overlay_fps_avg_window;
+    if (window_ms < 100) window_ms = 100;
+    if (window_ms > 2000) window_ms = 2000;
+    const uint64_t window_ns = static_cast<uint64_t>(window_ms) * 1000000ULL;
+
+    recent_deltas_ns.push_back(delta_ns);
+    running_sum_ns += delta_ns;
+    // Pop oldest while we cover more than the window, but always keep >= 2 frames
+    // so a single slow frame can't spike the display.
+    while (recent_deltas_ns.size() > 2 && running_sum_ns > window_ns) {
+        running_sum_ns -= recent_deltas_ns.front();
+        recent_deltas_ns.pop_front();
+    }
+    // Safety cap: ~2000 frames max even if window is huge / fps is extreme.
+    while (recent_deltas_ns.size() > 2000) {
+        running_sum_ns -= recent_deltas_ns.front();
+        recent_deltas_ns.pop_front();
+    }
+
+    const auto count = recent_deltas_ns.size();
+    if (count > 0 && running_sum_ns > 0) {
+        active_frametime_ms = static_cast<double>(running_sum_ns) / count / 1000000.0;
+        if (active_frametime_ms > 0.0) {
+            active_fps = 1000.0 / active_frametime_ms;
+        }
     }
 }
 
-void Steam_Overlay_Stats::update_playtime(const std::chrono::high_resolution_clock::time_point &now)
+void Steam_Overlay_Stats::update_playtime(const std::chrono::steady_clock::time_point &now)
 {
     const auto update_duration_sec = std::chrono::duration_cast<std::chrono::seconds>(
         now - last_playtime
@@ -95,7 +122,7 @@ void Steam_Overlay_Stats::update_playtime(const std::chrono::high_resolution_clo
 
 void Steam_Overlay_Stats::render_stats(int current_language)
 {
-    auto now = std::chrono::high_resolution_clock::now();
+    auto now = std::chrono::steady_clock::now();
     if (show_fps || show_frametime) {
         update_frametime(now);
     }
@@ -124,8 +151,8 @@ void Steam_Overlay_Stats::render_stats(int current_language)
     std::stringstream stats_txt_buff{};
     if (show_fps) {
         stats_txt_buff << translationFpsDisplay[current_language]
-                       << std::left << std::setw(2)
-                       << active_fps
+                       << std::left << std::setw(3)
+                       << static_cast<unsigned>(active_fps + 0.5)
                        << std::right << std::setw(0);
     }
     if (show_frametime) {
@@ -133,7 +160,7 @@ void Steam_Overlay_Stats::render_stats(int current_language)
             stats_txt_buff << " | ";
         }
         stats_txt_buff << translationFrametimeDisplay[current_language]
-                       << std::left << std::setw(4) << std::fixed << std::setprecision(1)
+                       << std::left << std::setw(4) << std::fixed << std::setprecision(2)
                        << active_frametime_ms
                        << std::defaultfloat << std::right << std::setw(0)
                        << translationFrametimeUnitDisplay[current_language];

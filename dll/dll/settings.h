@@ -377,7 +377,7 @@ public:
     bool disable_overlay_achievement_notification = false;
     bool disable_overlay_friend_notification = false;
     bool disable_overlay_achievement_progress = true;
-    unsigned overlay_fps_avg_window = 10;
+    unsigned overlay_fps_avg_window = 500;
     float overlay_stats_pos_x = 0.0f;
     float overlay_stats_pos_y = 0.0f;
     //warn people who use local save

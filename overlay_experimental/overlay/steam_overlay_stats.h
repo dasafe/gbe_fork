@@ -2,6 +2,8 @@
 #define _STEAM_OVERLAY_STATS_H_
 
 #include <chrono>
+#include <cstdint>
+#include <deque>
 #include <optional>
 #include <string_view>
 #include <unordered_map>
@@ -14,26 +16,30 @@ class Steam_Overlay_Stats {
 private:
     class Settings* settings{};
     
-    unsigned last_frametime_idx{};
-    std::chrono::high_resolution_clock::time_point last_frame_timepoint =
-        std::chrono::high_resolution_clock::now();
-    unsigned running_frametime_ms = 0; // used for the ongoing calculation
-    float active_frametime_ms = 0; // the final calculated frametime after averaging
-    unsigned active_fps = 0; // the final calculated FPS after averaging
+    // ms-based sliding average, ns precision, monotonic clock.
+    // fps_averaging_window = time window in milliseconds (default 500).
+    // FPS = 1000 / avg(frametime), like MangoHud fps_sampling_period /
+    // CapFrameX PresentMon MsBetweenPresents.
+    std::chrono::steady_clock::time_point last_frame_timepoint =
+        std::chrono::steady_clock::now();
+    std::deque<uint64_t> recent_deltas_ns{};
+    uint64_t running_sum_ns = 0; // sum of recent_deltas_ns
+    double active_frametime_ms = 0; // final averaged frametime
+    double active_fps = 0; // final averaged FPS (= 1000 / frametime)
 
 
-    std::chrono::high_resolution_clock::time_point initial_time =
-        std::chrono::high_resolution_clock::now();
-    std::chrono::high_resolution_clock::time_point last_playtime =
-        std::chrono::high_resolution_clock::now();
-    std::chrono::high_resolution_clock::duration total_playtime_paused{0};
-    std::optional<std::chrono::high_resolution_clock::time_point> playtime_pause_start;
+    std::chrono::steady_clock::time_point initial_time =
+        std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point last_playtime =
+        std::chrono::steady_clock::now();
+    std::chrono::steady_clock::duration total_playtime_paused{0};
+    std::optional<std::chrono::steady_clock::time_point> playtime_pause_start;
     unsigned active_playtime_hr = 0;
     unsigned active_playtime_min = 0;
     unsigned active_playtime_sec = 0;
 
-    void update_frametime(const std::chrono::high_resolution_clock::time_point &now);
-    void update_playtime(const std::chrono::high_resolution_clock::time_point &now);
+    void update_frametime(const std::chrono::steady_clock::time_point &now);
+    void update_playtime(const std::chrono::steady_clock::time_point &now);
 
 public:
     ImFont *font = nullptr;
