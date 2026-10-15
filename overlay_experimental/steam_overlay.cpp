@@ -243,6 +243,7 @@ Steam_Overlay::Steam_Overlay(Settings* settings, Local_Storage *local_storage, S
 
     parse_key_combo();
     parse_screenshot_key_combo();
+    parse_controller_toggle();
     strncpy(username_text, settings->get_local_name(), sizeof(username_text));
 
     // we need these copies to show the warning only once, then disable the flag
@@ -623,6 +624,44 @@ bool Steam_Overlay::open_overlay_hook(bool toggle)
     }
 
     return show_overlay;
+}
+
+// translate the ini string into a controller button and arm the poller.
+// this mirrors parse_key_combo()/parse_screenshot_key_combo(): the ini is read
+// as a plain string by the settings parser, and translated here.
+void Steam_Overlay::parse_controller_toggle()
+{
+    ControllerToggle::Button button = ControllerToggle::Button::Guide;
+    const std::string &name = settings->overlay_controller_toggle_button;
+
+    if (common_helpers::str_cmp_insensitive(name, "start")) {
+        button = ControllerToggle::Button::Start;
+    } else if (common_helpers::str_cmp_insensitive(name, "back")) {
+        button = ControllerToggle::Button::Back;
+    } else if (!common_helpers::str_cmp_insensitive(name, "guide")) {
+        PRINT_DEBUG("[X] Unknown controller toggle button '%s', using default 'guide'", name.c_str());
+    }
+
+    controller_toggle.Configure(settings->overlay_controller_toggle_enabled, button);
+}
+
+// only respond while the game window is focused, otherwise a controller press
+// in another application would toggle our overlay
+void Steam_Overlay::poll_controller_toggle()
+{
+#ifdef __WINDOWS__
+    const HWND fg = GetForegroundWindow();
+    if (fg != nullptr) {
+        DWORD fg_pid = 0;
+        GetWindowThreadProcessId(fg, &fg_pid);
+        if (fg_pid != GetCurrentProcessId()) return;
+    }
+#endif
+
+    if (controller_toggle.Poll()) {
+        PRINT_DEBUG("Controller hotkey triggered: toggling overlay");
+        open_overlay_hook(true);
+    }
 }
 
 void Steam_Overlay::allow_renderer_frame_processing(bool state, bool cleaning_up_overlay)
@@ -2061,6 +2100,9 @@ void Steam_Overlay::overlay_render_proc()
         }
 #endif
     }
+
+    // optional controller (Home/Guide) toggle, checked alongside the keyboard hotkey
+    poll_controller_toggle();
 
     // Process any captured screenshots and save them to disk
     process_captured_screenshots();

@@ -234,6 +234,21 @@ static void parse_overlay_hotkeys(class Settings *settings_client, class Setting
         settings_client->overlay_screenshot_keys = combo;
         settings_server->overlay_screenshot_keys = combo;
     }
+
+    // let the overlay class translate the button name string
+    auto controller_enabled_str = ini.GetValue("overlay::hotkeys", "controller_toggle_enabled");
+    if (controller_enabled_str && controller_enabled_str[0]) {
+        const bool enabled = (std::stol(controller_enabled_str, NULL) != 0);
+        settings_client->overlay_controller_toggle_enabled = enabled;
+        settings_server->overlay_controller_toggle_enabled = enabled;
+    }
+
+    auto controller_button_str = ini.GetValue("overlay::hotkeys", "controller_toggle_button");
+    if (controller_button_str && controller_button_str[0]) {
+        const std::string button = common_helpers::string_strip(controller_button_str);
+        settings_client->overlay_controller_toggle_button = button;
+        settings_server->overlay_controller_toggle_button = button;
+    }
 }
 
 // overlay::appearance

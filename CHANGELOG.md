@@ -1,4 +1,5 @@
 
+* add an optional setting to open/close the in-game overlay with a game controller button (Home/Guide, Start, or Back) on Windows (`overlay::hotkeys` -> `controller_toggle_enabled`, `controller_toggle_button`), off by default
 * **[Detanup01]** Fix GetISteamGenericInterface when asking for Interface: STEAMTIMELINE_INTERFACE_V001
 * **[KGHTW]** Fixing Steam Datagram Error. 
 

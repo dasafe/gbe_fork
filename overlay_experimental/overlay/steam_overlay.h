@@ -16,6 +16,7 @@
 #include "InGameOverlay/ImGui/imgui.h"
 #include "overlay/steam_overlay_stats.h"
 #include "overlay/vr_overlay.h"
+#include "overlay/controller_toggle.h"
 
 static constexpr size_t max_chat_len = 768;
 
@@ -213,6 +214,9 @@ class Steam_Overlay
     std::vector<InGameOverlay::ToggleKey> toggle_keys{};
     std::vector<InGameOverlay::ToggleKey> screenshot_keys{};
 
+    // optionally toggles the overlay via a game controller button. Off by default.
+    ControllerToggle controller_toggle{};
+
     struct ScreenshotItem {
         std::string filename;
         std::string full_path;
@@ -318,6 +322,8 @@ class Steam_Overlay
 
     void parse_key_combo();
     void parse_screenshot_key_combo();
+    void parse_controller_toggle();
+    void poll_controller_toggle();
     bool submit_notification(
         notification_type type,
         const std::string &msg,
