@@ -417,10 +417,10 @@ public:
     bool overlay_always_show_playtime = false;
     // keys used to toggle the overlay, default = Shift + Tab
     std::vector<std::string> overlay_toggle_keys{};
-    // optionally toggle the overlay with a game controller button
-    // (Windows/XInput). Off by default; button is "guide", "start", or "back"
-    bool overlay_controller_toggle_enabled = false;
-    std::string overlay_controller_toggle_button = "guide";
+    // optionally toggle the overlay with a game controller button (Windows/XInput).
+    // empty / "0" / "off" / "false" = disabled (also the default); otherwise
+    // "guide", "start", or "back"
+    std::string overlay_controller_toggle_button{};
     // 0=disable the F12 screenshot feature
     // default=1
     bool enable_screenshot = true;

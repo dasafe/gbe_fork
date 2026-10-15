@@ -626,23 +626,46 @@ bool Steam_Overlay::open_overlay_hook(bool toggle)
     return show_overlay;
 }
 
+// mirrors the false tokens accepted by simpleini's GetBoolValue(): "", "0", "f...", "n...", "off"
+static bool controller_toggle_disabled_token(const std::string &value)
+{
+    if (value.empty()) return true;
+
+    switch (value[0]) {
+        case '0':
+        case 'f': // "false"
+        case 'n': // "no"
+            return true;
+        case 'o': // "off"
+            return value == "off";
+        default:
+            return false;
+    }
+}
+
 // translate the ini string into a controller button and arm the poller.
-// this mirrors parse_key_combo()/parse_screenshot_key_combo(): the ini is read
-// as a plain string by the settings parser, and translated here.
+// a single setting doubles as the on/off switch, so an empty value, "0", "off",
+// or "false" disables it (same as omitting the setting entirely). this mirrors
+// parse_key_combo()/parse_screenshot_key_combo(): the ini is read as a plain
+// string by the settings parser, and translated here.
 void Steam_Overlay::parse_controller_toggle()
 {
-    ControllerToggle::Button button = ControllerToggle::Button::Guide;
-    const std::string &name = settings->overlay_controller_toggle_button;
+    const std::string value = common_helpers::to_lower(common_helpers::string_strip(settings->overlay_controller_toggle_button));
 
-    if (common_helpers::str_cmp_insensitive(name, "start")) {
+    bool enabled = true;
+    ControllerToggle::Button button = ControllerToggle::Button::Guide;
+
+    if (controller_toggle_disabled_token(value)) {
+        enabled = false;
+    } else if (value == "start") {
         button = ControllerToggle::Button::Start;
-    } else if (common_helpers::str_cmp_insensitive(name, "back")) {
+    } else if (value == "back") {
         button = ControllerToggle::Button::Back;
-    } else if (!common_helpers::str_cmp_insensitive(name, "guide")) {
-        PRINT_DEBUG("[X] Unknown controller toggle button '%s', using default 'guide'", name.c_str());
+    } else if (value != "guide") {
+        PRINT_DEBUG("[X] Unknown controller_toggle_button value '%s', using 'guide'", value.c_str());
     }
 
-    controller_toggle.Configure(settings->overlay_controller_toggle_enabled, button);
+    controller_toggle.Configure(enabled, button);
 }
 
 // only respond while the game window is focused, otherwise a controller press
