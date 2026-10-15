@@ -22,10 +22,8 @@
 
 #include "dll/base.h"
 
-#include <chrono>
-
-// Polls a game controller button and reports a single debounced "pressed"
-// edge, so a controller can open/close the in-game overlay just like the
+// Polls a game controller button and reports a single "pressed" rising edge,
+// so a controller can open/close the in-game overlay just like the
 // keyboard hotkey.
 //
 // Windows: uses XInput. The Xbox/Guide ("Home") bit is intentionally hidden by
@@ -54,7 +52,7 @@ public:
     // Does nothing when `enabled` is false, so the feature stays off by default.
     void Configure(bool enabled, Button button);
 
-    // Returns true exactly once per physical press (rising edge + short cooldown).
+    // Returns true exactly once per physical press (rising edge).
     bool Poll();
 
 private:
@@ -63,7 +61,6 @@ private:
 
     // Per-slot previous state, so a controller hot-swap / reconnect can't fake an edge.
     [[maybe_unused]] bool prev_down_[4] = { false, false, false, false };
-    [[maybe_unused]] std::chrono::steady_clock::time_point last_toggle_{};
     // Skip the very first sample, so a button already held at startup
     // doesn't immediately toggle the overlay.
     [[maybe_unused]] bool primed_ = false;

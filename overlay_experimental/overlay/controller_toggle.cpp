@@ -28,7 +28,6 @@ namespace {
 using XInputGetStateFn = DWORD (WINAPI *)(DWORD dwUserIndex, XINPUT_STATE *pState);
 
 constexpr DWORD XI_MAX_COUNT = 4;
-constexpr std::chrono::milliseconds TOGGLE_COOLDOWN{ 400 };
 
 // XINPUT_GAMEPAD_* button bits. Guide is defined here explicitly: not all
 // SDK headers ship XINPUT_GAMEPAD_GUIDE, and it's the whole point of this class.
@@ -111,12 +110,7 @@ bool ControllerToggle::Poll()
         return false;
     }
 
-    if (!rising) return false;
-
-    const auto now = std::chrono::steady_clock::now();
-    if (now - last_toggle_ < TOGGLE_COOLDOWN) return false;
-    last_toggle_ = now;
-    return true;
+    return rising;
 #else
     (void)enabled_;
     (void)button_;
